@@ -32,6 +32,32 @@ public struct PairingPayload: Codable, Sendable, Equatable {
     /// 会话过期时间（Unix 秒）。
     public let exp: Int64
 
+    /// 公网子域名（未开启公网访问时为空）。
+    ///
+    /// 它是一条**独立的**候选，而不是混在 `addresses` 里：两者的信任
+    /// 模型不同 —— 局域网那条是自签证书 + 这里固定的公钥指纹，
+    /// 公网那条是受信任证书 + 系统信任链。混在一起会让客户端把
+    /// 固定指纹用到公网路径上，而那会在证书续期换密钥之后失效，
+    /// 症状是"过一阵子连不上，重启一下又好了"。
+    public let publicHost: String?
+    /// 公网路径的端口。
+    public let publicPort: Int?
+
+    /// 与内核 JSON 的字段对应关系。
+    ///
+    /// # 为什么必须显式写出来
+    ///
+    /// 前八个字段的名字恰好与 JSON 一致（`v` / `kind` / `addresses` …），
+    /// 因此合成的 Codable **一直是对的** —— 直到出现第一个蛇形字段。
+    /// `public_host` 会被当成 `publicHost` 去解，结果是**静默的 nil**：
+    /// 不报错、不失败，只是那个字段永远是空，而症状是"扫了码还是
+    /// 只能在局域网用"。
+    private enum CodingKeys: String, CodingKey {
+        case v, kind, name, scheme, addresses, spki, secret, exp
+        case publicHost = "public_host"
+        case publicPort = "public_port"
+    }
+
     /// 逐字段构造。
     ///
     /// 需要的场景只有两个：测试要造各种畸形/过期载荷，而验收工具要在
@@ -40,7 +66,8 @@ public struct PairingPayload: Codable, Sendable, Equatable {
     public init(v: Int = PairingPayload.supportedVersion,
                 kind: String = PairingPayload.payloadKind,
                 name: String, scheme: String, addresses: [String],
-                spki: String, secret: String, exp: Int64) {
+                spki: String, secret: String, exp: Int64,
+                publicHost: String? = nil, publicPort: Int? = nil) {
         self.v = v
         self.kind = kind
         self.name = name
@@ -49,6 +76,8 @@ public struct PairingPayload: Codable, Sendable, Equatable {
         self.spki = spki
         self.secret = secret
         self.exp = exp
+        self.publicHost = publicHost
+        self.publicPort = publicPort
     }
 
     /// 换一组候选地址（其余字段不变）。

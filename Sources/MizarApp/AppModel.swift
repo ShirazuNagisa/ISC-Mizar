@@ -57,6 +57,12 @@ public final class AppModel {
     /// 而"待处理的目标"必须跨视图存活。
     public let push = PushCoordinator()
 
+    /// 可达性自检的执行者。
+    ///
+    /// 默认用真实的网络连接；注入点存在的唯一理由是让这一层能被测试
+    /// （真实验现在测试里要连网络，而这里要断言的是分支）。
+    public let probe = ReachabilityProbe()
+
     private let pool: ServerPool
     private var metricsTask: Task<Void, Never>?
     private var eventTask: Task<Void, Never>?
@@ -161,15 +167,8 @@ public final class AppModel {
     }
 
     /// 手输码探测（**不落库** —— 指纹要先给用户核对）。
-    public func probeManual(address: String, code: String, deviceName: String) async throws -> PairingService.PendingManualPairing {
-        try await PairingService().probe(address: address, code: code,
-                                         device: deviceInfo(deviceName))
-    }
 
     /// 用户核对过指纹之后落库。
-    public func commitManual(_ pending: PairingService.PendingManualPairing) async throws -> ServerRecord {
-        try await adopt(pending.outcome)
-    }
 
     private func adopt(_ outcome: PairingService.Outcome) async throws -> ServerRecord {
         _ = try await pool.add(outcome)
@@ -218,6 +217,13 @@ public final class AppModel {
             if let session = try? await pool.session(for: id) {
                 role = await session.role
                 currentServerInfo = await session.info
+                // 把服务端自述里的公网子域名记进本地记录。
+                //
+                // 二维码只带局域网地址（扫码时手机就在同一个网里），
+                // 而公网那一条只有内核知道。不写下来的话，手机在外面
+                // 永远只会去试局域网地址，然后全部超时。
+                let plan = currentServerInfo?.public
+                try? await pool.setPublicHost(plan?.host, port: plan?.port, for: id)
             }
             await refreshAll()
             startMetricsPolling()
@@ -313,6 +319,49 @@ public final class AppModel {
         PairingService.DeviceInfo(name: "Apple Watch", platform: "watchos",
                                   osVersion: PlatformInfo.systemVersion,
                                   appVersion: MizarVersion.reported)
+    }
+
+    /// 最近一次可达性自检的结论。
+    ///
+    /// 它同时被送到内核（由内核决定要不要写 A 记录），因此这里留着
+    /// 是为了**界面能显示**——"我到底测过没有"是用户最容易搞混的一件事。
+    public private(set) var reachability: PublicCheckReport?
+
+    /// 正在探测中。
+    public private(set) var probing = false
+
+    /// 跑一次可达性自检，并把结果报给内核。
+    ///
+    /// # 为什么这件事只能由手机做
+    ///
+    /// 内核测不了自己的入站可达性：本机发起的连接走的是内部路径
+    /// （同网段二层、跨网段 NAT 环回），与真实客户端的路径不同。
+    /// 而手机就在真实客户端要走的网络上。
+    ///
+    /// # 假阳性
+    ///
+    /// 手机在自己家里的 Wi-Fi 上时，连公网地址**也会成功** ——
+    /// 那个连接根本没出局域网。`ReachabilityProbe` 会先试局域网地址，
+    /// 通了就报 `sameLan`，内核据此记成 unknown 而不是 reachable。
+    @discardableResult
+    public func checkReachability() async -> PublicCheckReport? {
+        guard let plan = currentServerInfo?.public, plan.hasTargets else {
+            errorMessage = tr2("这台服务端还没有可探测的公网地址。请先在 Phecda 上开启公网访问并同步一次。",
+                               "This server has no public address to probe yet. Enable public access in Phecda and sync once.")
+            return nil
+        }
+        probing = true
+        defer { probing = false }
+
+        let report = await probe.run(plan: plan)
+        reachability = report
+
+        // 报给内核。报失败不阻断界面显示 —— 结论本身对用户仍然有用，
+        // 而"报不上去"只影响内核要不要写 A 记录。
+        if let kernel = try? await currentKernel() {
+            _ = try? await kernel.reportPublicCheck(report)
+        }
+        return report
     }
 
     /// 服务端列表或连接状态变化之后的回调。

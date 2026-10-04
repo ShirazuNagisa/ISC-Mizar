@@ -57,6 +57,13 @@ public actor ServerSession {
 
     private var record: ServerRecord
     private let token: String
+    /// 候选地址探测的单次超时。
+    ///
+    /// 4 秒的依据：局域网内的连接要么在几十毫秒内成功，要么就是不在
+    /// 这个网里。而一次连接可能要试七八个地址 —— 每个都等满 15 秒
+    /// 意味着离家在外时先卡一分多钟，而这期间界面什么都不显示。
+    static let probeTimeout: TimeInterval = 4
+
     private let makeTransport: TransportFactory
     private var client: KernelClient?
     /// 事件游标。0 表示"从现在开始"（内核的约定）。
@@ -70,9 +77,10 @@ public actor ServerSession {
         self.makeTransport = makeTransport
     }
 
-    public static let defaultTransport: TransportFactory = { url, spki, token, language in
-        HTTPTransport(configuration: .init(baseURL: url, token: token,
-                                           pinnedSPKI: spki, language: language))
+    public static let defaultTransport: TransportFactory = { spec in
+        HTTPTransport(configuration: .init(baseURL: spec.baseURL, token: spec.token,
+                                           trust: spec.trust, pinnedSPKI: spec.pinnedSPKI,
+                                           language: spec.language, timeout: spec.timeout))
     }
 
     /// 服务端记录的当前快照。
@@ -86,12 +94,20 @@ public actor ServerSession {
         state = .connecting
 
         var failures: [KernelError] = []
-        for baseURL in record.baseURLs() {
-            let transport = makeTransportWithToken(baseURL, language: language)
-            let candidate = KernelClient(transport: transport)
+        for candidate in record.candidates() {
+            guard let baseURL = candidate.baseURL(scheme: record.scheme) else { continue }
+            // 探测用**短超时**：一次连接可能要试七八个地址，而每个都等满
+            // 15 秒意味着离家在外时先卡一分多钟。连上之后的日常请求
+            // 用正常超时（见 `client` 的重建）。
+            let probeClient = KernelClient(transport: makeTransportWithToken(
+                baseURL, trust: candidate.trust, language: language,
+                timeout: Self.probeTimeout))
             do {
-                let selfInfo = try await candidate.remoteSelf()
-                client = candidate
+                let selfInfo = try await probeClient.remoteSelf()
+                // 连上之后把传输换成正常超时的：探测那条预算
+                // 对指标、长轮询、启动站点这些真实请求都太短。
+                client = KernelClient(transport: makeTransportWithToken(
+                    baseURL, trust: candidate.trust, language: language))
                 info = selfInfo
                 role = selfInfo.role
                 address = Self.hostPort(baseURL)
@@ -175,8 +191,15 @@ public actor ServerSession {
 
     // MARK: - 内部
 
-    private func makeTransportWithToken(_ baseURL: URL, language: String) -> any KernelTransport {
-        makeTransport(baseURL, record.spkiSHA256, token, language)
+    private func makeTransportWithToken(_ baseURL: URL, trust: TrustMode,
+                                        language: String,
+                                        timeout: TimeInterval = 15) -> any KernelTransport {
+        makeTransport(TransportSpec(baseURL: baseURL,
+                                    trust: trust,
+                                    pinnedSPKI: record.spkiSHA256,
+                                    token: token,
+                                    language: language,
+                                    timeout: timeout))
     }
 
     static func hostPort(_ url: URL) -> String {

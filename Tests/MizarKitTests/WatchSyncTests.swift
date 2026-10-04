@@ -137,7 +137,7 @@ private func makeRecord(name: String = "Mac-mini") -> ServerRecord {
     """))
     let tokens = InMemoryTokenStore()
     let pool = ServerPool(directory: dir, tokens: tokens,
-                          makeTransport: { _, _, _, _ in stub })
+                          makeTransport: { _ in stub })
 
     _ = try await pool.add(PairingService.Outcome(
         record: ServerRecord(id: "srv-1", name: "Mac-mini", scheme: "https",
@@ -185,7 +185,7 @@ private func makeRecord(name: String = "Mac-mini") -> ServerRecord {
 
     let tokens = InMemoryTokenStore()
     let pool = ServerPool(directory: dir, tokens: tokens,
-                          makeTransport: { _, _, _, _ in StubTransport() })
+                          makeTransport: { _ in StubTransport() })
 
     var record = ServerRecord(id: "srv-1", name: "Mac-mini", scheme: "https",
                               addresses: ["10.0.0.5:8788"], spkiSHA256: "AAAA",
@@ -203,6 +203,6 @@ private func makeRecord(name: String = "Mac-mini") -> ServerRecord {
     // 手表没有摄像头，因此它**从不自己配对** —— 缺令牌时的表现必须是
     // "需要重新配对"，而不是静默地从列表里消失。
     let reloaded = ServerPool(directory: dir, tokens: InMemoryTokenStore(),
-                              makeTransport: { _, _, _, _ in StubTransport() })
+                              makeTransport: { _ in StubTransport() })
     #expect(await reloaded.records().count == 1)
 }

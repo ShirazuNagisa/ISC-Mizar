@@ -17,8 +17,49 @@ public struct RemoteSelfInfo: Decodable, Sendable {
     public let role: String
     public let device: RemoteDeviceInfo
     public let server: PairingService.ServerInfo
+    /// 可达性自检的探测计划。
+    ///
+    /// 它挂在这里而不是单独一个接口：手机本来就每次连接都取一次
+    /// `/v1/remote/self`，因此不多一次往返，也意味着手机随时拿着
+    /// **最新**的公网地址（地址会变）。
+    public let `public`: PublicProbePlan?
 
     public var canWrite: Bool { role == "operator" }
+}
+
+/// 一次探测的回报（发给内核）。
+public struct PublicCheckRequest: Encodable, Sendable {
+    public var family: String
+    public var reachable: Bool
+    public var sameLan: Bool
+    public var detail: String?
+
+    public init(report: PublicCheckReport) {
+        self.family = report.family
+        self.reachable = report.reachable
+        self.sameLan = report.sameLan
+        self.detail = report.detail
+    }
+}
+
+/// 公网访问的状态（内核侧）。
+public struct PublicStatus: Decodable, Sendable {
+    public let enabled: Bool
+    public let ready: Bool
+    public let host: String?
+    public let records: [String: String]?
+    public let lastCheck: PublicCheck?
+
+    public struct PublicCheck: Decodable, Sendable {
+        public let at: Date
+        public let verdict: String
+        public let family: String?
+        public let detail: String?
+    }
+
+    /// 内核观测到的 AAAA / A 地址。
+    public var ipv6: String? { records?["AAAA"] }
+    public var ipv4: String? { records?["A"] }
 }
 
 public struct RemoteDeviceInfo: Decodable, Sendable, Identifiable {

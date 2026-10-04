@@ -119,8 +119,8 @@ private func makePayload() throws -> PairingPayload {
 
 /// 造一个"按地址分发假传输"的工厂。
 private func factory(_ byAddress: [String: StubTransport], defaultFallback: StubTransport? = nil) -> TransportFactory {
-    { url, _, _, _ in
-        byAddress[url.absoluteString] ?? defaultFallback ?? StubTransport()
+    { spec in
+        byAddress[spec.baseURL.absoluteString] ?? defaultFallback ?? StubTransport()
     }
 }
 
@@ -262,52 +262,8 @@ private let device = PairingService.DeviceInfo(name: "iPhone", platform: "ios", 
 
 // MARK: - 配对：手输路径
 
-@Test func manualProbeNormalizesTheCodeAndReturnsTheFingerprint() async throws {
-    let stub = StubTransport()
-    await stub.enqueue("POST", "/v1/remote/pair", .ok(pairResponse))
 
-    let service = PairingService(makeTransport: factory(["https://192.168.1.10:8788": stub]))
-    // 用户会把码念出来再敲进去：小写、带连字符。
-    let pending = try await service.probe(address: "192.168.1.10:8788", code: "xrav-03", device: device)
 
-    #expect(pending.fingerprintShort == "4C4A-ECBE")
-    #expect(pending.serverName == "Mac-mini")
-    // 探测**不落库** —— 指纹要先给用户核对。
-    #expect(pending.outcome.record.spkiSHA256 == "TErcJ99SbmE1HNydX19qHAuNhRpsr5jH71UR2Zkw420")
-}
-
-@Test func manualProbeRejectsMalformedCodesBeforeAnyRequest() async throws {
-    let stub = StubTransport()
-    let service = PairingService(makeTransport: factory(["https://192.168.1.10:8788": stub]))
-
-    for bad in ["ABC", "AB!DEF", "ABCDEFG", ""] {
-        do {
-            _ = try await service.probe(address: "192.168.1.10:8788", code: bad, device: device)
-            Issue.record("\(bad) 应当被本地拒绝")
-        } catch let error as PairingError {
-            guard case .rejected = error else {
-                Issue.record("期望 .rejected，得到 \(error)")
-                return
-            }
-        }
-    }
-    #expect(await stub.calls.isEmpty, "格式不对的码不该发起请求")
-}
-
-@Test func addressNormalizationAcceptsWhatPeopleActuallyPaste() {
-    #expect(PairingService.normalize(address: "192.168.1.10:8788", scheme: "https")?.absoluteString
-            == "https://192.168.1.10:8788")
-    #expect(PairingService.normalize(address: "  https://192.168.1.10:8788/  ", scheme: "https")?.absoluteString
-            == "https://192.168.1.10:8788")
-    // 从浏览器地址栏复制过来的常常带路径与查询；它们对内核接口没有意义。
-    #expect(PairingService.normalize(address: "https://192.168.1.10:8788/console/?x=1", scheme: "https")?
-        .absoluteString == "https://192.168.1.10:8788")
-    // IPv6 必须带方括号，否则解析出来是一个无效地址。
-    #expect(PairingService.normalize(address: "[240e::1]:8788", scheme: "https")?.absoluteString
-            == "https://[240e::1]:8788")
-    #expect(PairingService.normalize(address: "", scheme: "https") == nil)
-    #expect(PairingService.normalize(address: "   ", scheme: "https") == nil)
-}
 
 // MARK: - 会话
 
@@ -460,10 +416,13 @@ private func makePool(directory: URL, tokens: TokenStore,
                       transports: [String: StubTransport] = [:]) -> ServerPool {
     ServerPool(directory: directory,
                tokens: tokens,
-               makeTransport: { url, spki, token, language -> any KernelTransport in
-                   if let stub = transports[url.absoluteString] { return stub }
-                   return HTTPTransport(configuration: .init(baseURL: url, token: token,
-                                                             pinnedSPKI: spki, language: language))
+               makeTransport: { spec -> any KernelTransport in
+                   if let stub = transports[spec.baseURL.absoluteString] { return stub }
+                   return HTTPTransport(configuration: .init(baseURL: spec.baseURL,
+                                                             token: spec.token, trust: spec.trust,
+                                                             pinnedSPKI: spec.pinnedSPKI,
+                                                             language: spec.language,
+                                                             timeout: spec.timeout))
                })
 }
 
@@ -550,4 +509,97 @@ private func tempDirectory() -> URL {
     let stored = try #require(await pool.records().first)
     #expect(stored.role == "operator", "角色必须以服务端为准")
     #expect(stored.lastGoodAddress == "192.168.1.10:8788")
+}
+
+/// 二维码里的公网子域名必须进得了记录。
+///
+/// # 这条测的是"扫一次，从此在哪都能用"
+///
+/// 二维码的 `addresses` 只有局域网候选（那是扫码时手机所在的网络）。
+/// 公网那一条是**独立字段**，因为它用的信任模型不同：局域网是自签
+/// 证书 + 固定指纹，公网是受信任证书 + 系统信任链。
+///
+/// 少了这个传递，扫一次只在**家里**有用 —— 出门之后手机手上只有
+/// `192.168.x.x` 与 `.local`，全部超时，而内核其实在公网上等着。
+/// 它会靠第一次连上之后的自述自愈，但那要求用户先回一次家。
+@Test func pairingPayloadCarriesThePublicHostIntoTheRecord() throws {
+    // 内核生成的载荷（含公网子域名）。
+    let raw = """
+    {
+      "v": 1, "kind": "isc-remote", "name": "Mac-mini", "scheme": "https",
+      "addresses": ["192.168.31.92:8788"],
+      "spki": "AAAA", "secret": "s3cret", "exp": 4000000000,
+      "public_host": "mizar-abc.example.com", "public_port": 8788
+    }
+    """
+    let payload = try PairingPayload.parse(raw)
+    #expect(payload.publicHost == "mizar-abc.example.com")
+    #expect(payload.publicPort == 8788)
+
+    // 两条候选的信任模型必须不同 —— 混用会让公网路径固定在
+    // 一个续期就会换掉的密钥上。
+    let record = ServerRecord(
+        name: payload.name, scheme: payload.scheme,
+        addresses: payload.addresses, spkiSHA256: payload.spki, role: "operator",
+        publicHost: payload.publicHost, publicPort: payload.publicPort)
+    let candidates = record.candidates()
+    #expect(candidates.count == 2)
+    #expect(candidates[0].trust == .pin)
+    #expect(candidates[1].trust == .system)
+}
+
+/// 老版本的载荷（没有公网字段）必须照常工作。
+///
+/// 内核与 App 是两个独立更新的东西，而"新 App 扫旧内核的码"是
+/// 升级期间的常态。
+@Test func pairingPayloadWithoutPublicHostStillWorks() throws {
+    let raw = """
+    {
+      "v": 1, "kind": "isc-remote", "name": "Mac-mini", "scheme": "https",
+      "addresses": ["192.168.31.92:8788"],
+      "spki": "AAAA", "secret": "s3cret", "exp": 4000000000
+    }
+    """
+    let payload = try PairingPayload.parse(raw)
+    #expect(payload.publicHost == nil, "没有这个字段时应当是 nil，而不是解析失败")
+    #expect(payload.addresses.count == 1)
+}
+
+/// 配对链接与二维码装的是**同一份载荷**。
+///
+/// # 这条挡的是"扫得进、粘不进"
+///
+/// 链接由**内核**生成（`QRLink`），Mizar 这边只负责解析。如果哪天
+/// 有人在这边自己拼一遍链接，两个实现就会漂移 —— 而症状是某个
+/// 版本组合上"二维码能扫、链接粘不进去"，只在特定版本对上出现。
+///
+/// 这里用内核真实生成的载荷做往返：`link()` → `parse()` 必须逐字段相等。
+@Test func pairingLinkRoundTripsToTheSamePayload() throws {
+    let original = PairingPayload(
+        name: "Mac-mini", scheme: "https",
+        addresses: ["192.168.31.92:8788", "[2409:8a50:6a1:7450::560]:8788"],
+        spki: "TErcJ99SbmE1HNydX19qHAuNhRpsr5jH71UR2Zkw420",
+        secret: "S0me-High-Entropy-Secret", exp: 4_000_000_000,
+        publicHost: "mizar-abc.example.com", publicPort: 8788)
+
+    let text = try original.link()
+    #expect(text.hasPrefix("isc-remote://pair?d="))
+
+    let parsed = try PairingPayload.parse(text)
+    #expect(parsed == original, "往返之后载荷变了 —— 链接与二维码会各说各话")
+    #expect(parsed.publicHost == "mizar-abc.example.com")
+}
+
+/// 粘贴时两边带的空白必须被容忍。
+///
+/// 用户从聊天窗口复制过来的东西常常带换行或首尾空格，而因为一个
+/// 看不见的换行就报"链接无效"是最让人恼火的一类失败。
+@Test func pairingLinkToleratesSurroundingWhitespace() throws {
+    let original = PairingPayload(
+        name: "Mac-mini", scheme: "https", addresses: ["192.168.1.10:8788"],
+        spki: "AAAA", secret: "s", exp: 4_000_000_000)
+    let text = try original.link()
+
+    let parsed = try PairingPayload.parse("  \n\(text)\n  ")
+    #expect(parsed.secret == original.secret)
 }

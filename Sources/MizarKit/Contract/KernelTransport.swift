@@ -35,8 +35,60 @@ public protocol KernelTransport: Sendable {
 /// 该进入什么状态。这些用真实的 HTTPS 服务端来测既慢又难构造
 /// （要起一个能返回各种错误的服务端），而注入一个假传输之后，
 /// 它们全部变成纯粹的断言。
-public typealias TransportFactory = @Sendable (_ baseURL: URL, _ pinnedSPKI: String?,
-                                               _ token: String, _ language: String) -> any KernelTransport
+public typealias TransportFactory = @Sendable (TransportSpec) -> any KernelTransport
+
+/// 一条连接要用哪种 TLS 信任模型。
+///
+/// # 为什么是三种而不是"固定指纹 / 不固定"
+///
+/// 三条路径的可信来源完全不同：
+///
+///   - **局域网**：自签证书，没有可信任的签发者。可信来源是二维码里
+///     带过来的公钥指纹 —— 因此只能是"固定指纹"。
+///   - **手输六位码**：那条路径上客户端**拿不到**指纹，只能先连上去
+///     把指纹取回来，再让用户与另一端的屏幕核对。这是"首次使用"，
+///     而它**不等于**"不校验"：校验被推迟到用户确认。
+///   - **公网域名**：Let's Encrypt 签发的受信任证书。这时标准信任链
+///     才是对的来源 —— 而固定指纹在这里是**错的**：证书续期会换密钥，
+///     固定之后每次续期都会连不上，而症状是"隔一段时间就连不上，
+///     重启一下又好了"。
+public enum TrustMode: String, Codable, Sendable, Equatable {
+    /// 固定公钥指纹。
+    case pin
+    /// 首次使用时接受并记下指纹，交给用户核对。
+    case trustOnFirstUse
+    /// 标准系统信任链。
+    case system
+}
+
+/// 一次传输的完整描述。
+///
+/// 用一个结构而不是四个位置参数：信任模型、指纹、令牌、语言这几件事
+/// 里有两组是**互斥**的（`.pin` 必须有指纹，`.system` 必须没有），
+/// 位置参数让"传错了位置"编译得过去，而结构体不会。
+public struct TransportSpec: Sendable {
+    public var baseURL: URL
+    public var trust: TrustMode
+    /// `.pin` 时必填；其余模式必须为空。
+    public var pinnedSPKI: String?
+    public var token: String
+    public var language: String
+    /// 单次请求超时。
+    ///
+    /// 候选地址探测要给它一个**短的**值：一次连接可能要试七八个地址，
+    /// 而每个都等满 15 秒意味着离家在外时先卡一分多钟。
+    public var timeout: TimeInterval
+
+    public init(baseURL: URL, trust: TrustMode, pinnedSPKI: String? = nil,
+                token: String, language: String, timeout: TimeInterval = 15) {
+        self.baseURL = baseURL
+        self.trust = trust
+        self.pinnedSPKI = pinnedSPKI
+        self.token = token
+        self.language = language
+        self.timeout = timeout
+    }
+}
 
 /// 一批事件。
 public struct EventBatch: Sendable, Equatable {

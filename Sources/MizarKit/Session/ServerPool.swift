@@ -122,6 +122,35 @@ public actor ServerPool {
         }
     }
 
+    /// 记下这台服务端的公网子域名。
+    ///
+    /// # 它为什么必须存在
+    ///
+    /// 二维码里带的是**局域网**候选地址（`Candidates`）—— 那是对的，
+    /// 因为扫码时手机就在同一个网里。但服务端还可以从公网访问，
+    /// 而那一条只有内核知道（它在用户的域名下建了子域名）。
+    ///
+    /// 没有这个写入点的话：`ServerRecord.publicHost` 永远是 nil，
+    /// 于是候补列表里永远只有局域网地址，而"支持域名 + 标准 TLS"
+    /// 那几层代码**永远不会被执行** —— 每一层都有测试，
+    /// 而层与层之间没有接线。
+    ///
+    /// 地址变了就更新，没变就不写：这个方法每次连接后都会被调，
+    /// 而每次都写盘是没必要的。
+    public func setPublicHost(_ host: String?, port: Int?, for id: String) async throws {
+        guard var record = await store.record(id: id) else { return }
+        let normalized = (host?.isEmpty ?? true) ? nil : host
+        if record.publicHost == normalized && record.publicPort == port {
+            return
+        }
+        record.publicHost = normalized
+        record.publicPort = port
+        try await store.upsert(record)
+        // 会话里存着**改之前**的那份记录，而它决定了候选地址列表 ——
+        // 不重建的话，刚拿到的公网地址要等下次重启才生效。
+        sessions[id] = nil
+    }
+
     /// 手表令牌在钥匙串里的键。
     ///
     /// 与主令牌分开存：手表的令牌是**另一台设备**的凭据，把它们放在

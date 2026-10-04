@@ -37,6 +37,12 @@ public struct HTTPTransport: KernelTransport {
         ///
         /// 换句话说：`nil` **不等于**"不校验"，而是"校验推迟到用户确认"。
         /// 任何日常请求都必须带指纹。
+        /// 信任模型。
+        ///
+        /// 三条路径各有各的可信来源，见 `TrustMode` 的说明。
+        public var trust: TrustMode
+
+        /// `.pin` 时的公钥指纹。
         public var pinnedSPKI: String?
         /// 发给内核的 `Accept-Language`。
         ///
@@ -46,11 +52,19 @@ public struct HTTPTransport: KernelTransport {
         /// 单次请求的超时（长轮询另有更长的上限）。
         public var timeout: TimeInterval
 
-        public init(baseURL: URL, token: String, pinnedSPKI: String?,
+        public init(baseURL: URL, token: String, trust: TrustMode,
+                    pinnedSPKI: String? = nil,
                     language: String = "zh-CN", timeout: TimeInterval = 15) {
             self.baseURL = baseURL
             self.token = token
-            self.pinnedSPKI = pinnedSPKI
+            self.trust = trust
+            // `.pin` 却没有指纹是一个**编程错误**，而不是运行时状况：
+            // 放过去会让连接退化成"接受任何证书"，而那正是固定指纹
+            // 要防的事。这里把它暴露在最显眼的地方。
+            if trust == .pin && (pinnedSPKI ?? "").isEmpty {
+                self.trust = .trustOnFirstUse
+            }
+            self.pinnedSPKI = trust == .system ? nil : pinnedSPKI
             self.language = language
             self.timeout = timeout
         }
@@ -76,7 +90,15 @@ public struct HTTPTransport: KernelTransport {
         cfg.urlCache = nil
         self.session = URLSession(
             configuration: cfg,
-            delegate: PinningDelegate(pinnedSPKI: configuration.pinnedSPKI, recorder: recorder),
+            // `.system` 刻意**不装代理**：让 URLSession 走它默认的
+            // 标准信任链评估。自己写一遍评估只是把系统已经做对的事
+            // 重做一遍，而做错的方式（漏掉吊销检查、漏掉主机名匹配）
+            // 恰好都是最危险的那些。
+            delegate: configuration.trust == .system
+                ? nil
+                : PinningDelegate(trust: configuration.trust,
+                                  pinnedSPKI: configuration.pinnedSPKI,
+                                  recorder: recorder),
             delegateQueue: nil)
     }
 
@@ -254,11 +276,17 @@ final class PinRecorder: @unchecked Sendable {
 /// 而信任正是来自那个比对：指纹是用户在配对时通过二维码（或两端肉眼
 /// 核对）建立的。
 final class PinningDelegate: NSObject, URLSessionDelegate, @unchecked Sendable {
-    /// nil 表示首次使用：接受并把指纹记下来，由调用方让用户核对。
+    /// 信任模型。构造函数**拒绝** `.system` —— 那种模式不该经过这里。
+    ///
+    /// 叫 `trustMode` 而不是 `trust`：代理方法里那个局部变量
+    /// `trust` 是 `SecTrust`，两个名字撞上会让 `trust == .pin`
+    /// 被解析成"SecTrust 上没有 pin 这个成员"。
+    private let trustMode: TrustMode
     private let pinnedSPKI: String?
     private let recorder: PinRecorder
 
-    init(pinnedSPKI: String?, recorder: PinRecorder) {
+    init(trust: TrustMode, pinnedSPKI: String?, recorder: PinRecorder) {
+        self.trustMode = trust
         self.pinnedSPKI = pinnedSPKI
         self.recorder = recorder
     }
@@ -282,7 +310,7 @@ final class PinningDelegate: NSObject, URLSessionDelegate, @unchecked Sendable {
         recorder.record(observed: actual)
 
         // 首次使用：接受，但把指纹留给调用方核对。
-        guard let pinnedSPKI else {
+        guard trustMode == .pin, let pinnedSPKI else {
             completionHandler(.useCredential, URLCredential(trust: trust))
             return
         }

@@ -65,10 +65,14 @@ func commit(_ outcome: PairingService.Outcome, into stateDirectory: URL) async t
 }
 
 switch arguments[1] {
-case "pair-qr":
-    // 扫码路径：指纹来自二维码，TLS 握手时就比对 —— 这是**强校验**，
-    // 也是这个功能里唯一无法用单元测试证明的环节。
-    guard arguments.count >= 4 else { fail("pair-qr 需要 <二维码原文> <状态目录> [可达地址]") }
+case "pair-qr", "pair-link":
+    // 扫码与配对链接走的是**同一条路径** —— 两者装的是同一份载荷，
+    // 只是载体不同（像素 vs 文本）。因此这里不做区分：拿配对链接
+    // 走一遍，等价于验证了扫码那条路（除了摄像头本身）。
+    //
+    // 指纹来自载荷，TLS 握手时就比对 —— 这是**强校验**，也是这个
+    // 功能里唯一无法用单元测试证明的环节。
+    guard arguments.count >= 4 else { fail("\(arguments[1]) 需要 <二维码原文或配对链接> <状态目录> [可达地址]") }
     let stateDirectory = URL(fileURLWithPath: arguments[3])
     try? FileManager.default.createDirectory(at: stateDirectory, withIntermediateDirectories: true)
 
@@ -76,7 +80,7 @@ case "pair-qr":
     do {
         parsed = try PairingPayload.parse(arguments[2])
     } catch {
-        fail("二维码无法解析：\(error.localizedDescription)")
+        fail("载荷无法解析：\(error.localizedDescription)")
     }
 
     // 可选的可达地址覆盖：验收脚本在**同一台机器**上跑内核，而二维码里
@@ -100,22 +104,6 @@ case "pair-qr":
         fail("配对失败：\(error.localizedDescription)")
     }
 
-case "pair-code":
-    // 手输路径：没有二维码，因此指纹要从响应里取，再让用户核对。
-    guard arguments.count >= 5 else { fail("pair-code 需要 <地址> <六位码> <状态目录>") }
-    let stateDirectory = URL(fileURLWithPath: arguments[4])
-    try? FileManager.default.createDirectory(at: stateDirectory, withIntermediateDirectories: true)
-
-    do {
-        let pending = try await PairingService().probe(
-            address: arguments[2], code: arguments[3],
-            device: .init(name: "mizar-acceptance-code", platform: "macos"))
-        guard !pending.fingerprintShort.isEmpty else { fail("响应里没有指纹，用户无从核对") }
-        ok("探测成功，可核对指纹 \(pending.fingerprintShort)（这一段要由用户与 Phecda 核对）")
-        try await commit(pending.outcome, into: stateDirectory)
-    } catch {
-        fail("探测失败：\(error.localizedDescription)")
-    }
 
 case "status":
     guard arguments.count >= 3 else { fail("status 需要 <状态目录>") }

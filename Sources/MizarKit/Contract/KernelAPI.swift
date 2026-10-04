@@ -236,4 +236,17 @@ extension KernelClient {
     public func proxyStatus() async throws -> ProxyStatus {
         try await send("GET", "/v1/proxy/status", body: Optional<Never>.none, as: ProxyStatus.self)
     }
+
+    // MARK: - 公网访问
+
+    /// 回报一次可达性自检的结果。
+    ///
+    /// 内核据此决定要不要写 A 记录 —— **只有实测过 IPv4 可达才写**。
+    /// 写一条连不上的 A 比不写更糟：客户端默认先试 IPv4，
+    /// 于是它会先卡在一个永远连不上的地址上。
+    @discardableResult
+    public func reportPublicCheck(_ report: PublicCheckReport) async throws -> PublicStatus {
+        try await send("POST", "/v1/remote/public/check",
+                       body: PublicCheckRequest(report: report), as: PublicStatus.self)
+    }
 }

@@ -119,12 +119,11 @@ struct AddServerView: View {
 
     @State private var mode: Mode = .scan
     @State private var deviceName = ""
-    @State private var address = ""
-    @State private var code = ""
+    /// 粘贴进来的配对链接。
+    @State private var link = ""
     @State private var busy = false
     @State private var failure: String?
     /// 手输路径的中间结果：等用户核对指纹。
-    @State private var pending: PairingService.PendingManualPairing?
 
     var body: some View {
         NavigationStack {
@@ -161,18 +160,11 @@ struct AddServerView: View {
                 }
                 if busy { ToolbarItem(placement: .status) { ProgressView().controlSize(.small) } }
             }
-            .sheet(item: $pending) { pendingPairing in
-                FingerprintConfirmView(pending: pendingPairing) {
-                    Task { await commit(pendingPairing) }
-                } onCancel: {
-                    // 用户说指纹不对：**丢弃令牌**，并明确告诉他配对码
-                    // 可能已经泄露。静默丢弃会让他在 Phecda 上留着一个
-                    // 仍然有效的会话，而那个会话正是攻击者可用的东西。
-                    self.pending = nil
-                    failure = tr("已取消。请在 Phecda 上取消那个配对会话并重新生成一个 —— 这一次的配对码可能已经被别人看到。",
-                                 "Cancelled. Cancel that pairing session in Phecda and generate a new one — this code may have been seen by someone else.")
-                }
-            }
+            // **指纹确认弹窗已删除。**
+            //
+            // 它存在的前提是"六位码不携带任何身份信息，所以要人工比一比"。
+            // 六位码已去掉，而二维码与配对链接里装着指纹 —— 核对是内建的，
+            // 留着弹窗只会让人多做一步没有意义的事。
         }
     }
 
@@ -187,8 +179,8 @@ struct AddServerView: View {
             Text(tr("对准 Phecda 上的配对二维码。", "Point at the pairing code in Phecda."))
                 .font(.caption).foregroundStyle(.secondary)
             #else
-            Text(tr("这个平台没有摄像头，请改用「手动输入」。",
-                    "This platform has no camera; use “Enter code” instead."))
+            Text(tr("这个平台没有摄像头，请改用下面的配对链接。",
+                    "This platform has no camera; use the pairing link below instead."))
                 .font(.callout).foregroundStyle(.secondary)
             #endif
 
@@ -206,35 +198,44 @@ struct AddServerView: View {
 
     private var manualSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            TextField(tr("地址，例如 192.168.1.10:8788", "Address, e.g. 192.168.1.10:8788"),
-                      text: $address)
-                .textFieldStyle(.roundedBorder)
-                #if os(iOS)
-                .keyboardType(.URL)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                #endif
+            // 先问"有没有链接"，有的话地址与配对码都不必填。
+            //
+            // 那个顺序是有意的：能一条链接解决的事，不该让人去手打
+            // 一串 IP。而链接里装的不只是地址 —— 还有公钥指纹，
+            // 也就是说手动路径本来要做的"两端核对指纹"那一步也省了。
+            VStack(alignment: .leading, spacing: 6) {
+                Text(tr("方式一：粘贴配对链接", "Option 1: paste a pairing link"))
+                    .font(.caption).foregroundStyle(.secondary)
 
-            TextField(tr("六位配对码", "Six-character code"), text: $code)
-                .textFieldStyle(.roundedBorder)
-                .font(.system(.title3, design: .monospaced))
-                #if os(iOS)
-                .textInputAutocapitalization(.characters)
-                .autocorrectionDisabled()
-                #endif
+                TextField(tr("isc-remote://pair?d=…", "isc-remote://pair?d=…"), text: $link)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(.caption, design: .monospaced))
+                    #if os(iOS)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    #endif
 
-            Text(tr("配对码显示在 Phecda 的二维码下方。字母 O 与数字 0、字母 I/L 与数字 1 会按同一种理解，输入哪个都行。",
-                    "The code is shown below the QR code in Phecda. O/0 and I/L/1 are treated the same, so either is fine."))
-                .font(.caption).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+                Button {
+                    Task { await pairFromLink() }
+                } label: {
+                    Label(tr("用链接连接", "Connect with link"), systemImage: "link")
+                }
+                .buttonStyle(.glassProminent)
+                .disabled(busy || link.trimmingCharacters(in: .whitespaces).isEmpty)
 
-            Button {
-                Task { await probeManual() }
-            } label: {
-                Label(tr("连接", "Connect"), systemImage: "arrow.right.circle")
+                Text(tr("链接在 Phecda 的配对弹窗上，点「复制配对链接」即可。五分钟内有效、用一次即失效。",
+                        "The link is in Phecda's pairing sheet — tap “Copy pairing link”. Valid for five minutes, single use."))
+                    .font(.caption2).foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            .buttonStyle(.glassProminent)
-            .disabled(busy || address.isEmpty || code.isEmpty)
+
+            // 地址 + 六位码那条路已删除。
+            //
+            // 六位码只有约 10 亿种可能、靠按来源锁定兜底，而且携带不了
+            // 任何身份信息（所以那时必须让用户人工比对公钥指纹）。
+            // 二维码与配对链接里的密钥是 256 位，且自带指纹。
+            //
+            // 链接就是"没法扫码"时的替代 —— 传过去、粘一次即可。
         }
     }
 
@@ -256,29 +257,27 @@ struct AddServerView: View {
         busy = false
     }
 
-    private func probeManual() async {
+    /// 用粘贴进来的配对链接连接。
+    ///
+    /// 走的是与扫码**完全相同**的那条路（`AppModel.pairFromLink` →
+    /// `PairingService.pair(payloadText:)`）—— 链接与二维码里装的是
+    /// 同一份载荷，只是载体不同。两条独立实现意味着两处会漂移，
+    /// 而漂移的症状是"扫得进、粘不进"。
+    private func pairFromLink() async {
         busy = true
         failure = nil
-        do {
-            pending = try await model.probeManual(address: address, code: code, deviceName: deviceName)
-        } catch {
-            failure = error.localizedDescription
+        await model.pairFromLink(link.trimmingCharacters(in: .whitespacesAndNewlines))
+        // 成功与否由 model 决定；这里只负责把输入框收干净，
+        // 免得那条已经用掉的链接还留在屏幕上被再点一次。
+        if model.errorMessage == nil {
+            link = ""
+        } else {
+            failure = model.errorMessage
         }
         busy = false
     }
 
-    private func commit(_ pending: PairingService.PendingManualPairing) async {
-        busy = true
-        do {
-            _ = try await model.commitManual(pending)
-            self.pending = nil
-            dismiss()
-        } catch {
-            failure = error.localizedDescription
-            self.pending = nil
-        }
-        busy = false
-    }
+
 }
 
 /// 手输路径的指纹核对。
@@ -287,52 +286,7 @@ struct AddServerView: View {
 ///
 /// 扫码路径的指纹来自二维码 —— 那是密码学意义上建立起来的信任。
 /// 手输路径没有二维码，客户端只能**先连上去**再把指纹拿回来，因此
-/// 中间人在这里是可能的。核对多花五秒，而不核对的代价是：一次配对时的
-/// 中间人可以长期篡改返回的一切（包括 DNS 记录），而用户不会有任何察觉。
-struct FingerprintConfirmView: View {
-    let pending: PairingService.PendingManualPairing
-    let onConfirm: () -> Void
-    let onCancel: () -> Void
-
-    var body: some View {
-        VStack(spacing: 16) {
-            Image(systemName: "checkmark.shield")
-                .font(.system(size: 40))
-                .foregroundStyle(Color.accentColor)
-
-            Text(tr("核对指纹", "Compare the fingerprint"))
-                .font(.title3.weight(.semibold))
-
-            Text(pending.serverName)
-                .font(.callout).foregroundStyle(.secondary)
-
-            Text(pending.fingerprintShort)
-                .font(.system(size: 30, weight: .semibold, design: .monospaced))
-                .textSelection(.enabled)
-
-            Text(tr("这一串必须与 Phecda 上「远程访问」页显示的公钥指纹完全一致。不一致就点「不一致」—— 那说明你连上的不是那台机器。",
-                    "This must match the key fingerprint shown on Phecda's Remote Access page exactly. If it does not, tap “Does not match” — it means you are not talking to that machine."))
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: Theme.messageMaxWidth)
-                .fixedSize(horizontal: false, vertical: true)
-
-            HStack(spacing: 12) {
-                Button(tr("不一致", "Does not match"), role: .destructive, action: onCancel)
-                Button(tr("一致，完成配对", "Matches, finish pairing"), action: onConfirm)
-                    .buttonStyle(.glassProminent)
-                    .keyboardShortcut(.defaultAction)
-            }
-        }
-        .padding(24)
-        .frame(minWidth: 380)
-    }
-}
-
-/// 剪贴板。
-///
-/// 单独包一层是因为 `UIPasteboard`（iOS）与 `NSPasteboard`（macOS）类型
+/// 中间人在这里是可能的。核对多花五秒，而不核对的代价是：一次配对时的/// 单独包一层是因为 `UIPasteboard`（iOS）与 `NSPasteboard`（macOS）类型
 /// 不同，而这个应用要在两个平台上编译。
 enum Pasteboard {
     static var string: String? {
@@ -345,3 +299,4 @@ enum Pasteboard {
         #endif
     }
 }
+

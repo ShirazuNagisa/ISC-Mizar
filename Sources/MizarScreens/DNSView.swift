@@ -226,6 +226,47 @@ struct SettingsView: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
 
+                    // 可达性自检的入口。
+                    //
+                    // # 为什么是手机来测
+                    //
+                    // 内核测不了自己的入站可达性：本机发起的连接走的是
+                    // 内部路径（同网段二层、跨网段 NAT 环回），与真实
+                    // 客户端的路径不同。而手机就在真实客户端要走的网络上。
+                    //
+                    // # 手机自己在家里的 Wi-Fi 上时测不准
+                    //
+                    // 那时连公网地址**也会成功**，因为那个连接根本没出
+                    // 局域网。探测本身会先试局域网地址，通了就报"不作数"——
+                    // 因此下面这句话是必须说的，否则用户会得到一个
+                    // 看起来通过、其实什么都没证明的结果。
+                    if model.currentServerInfo?.public?.hasTargets == true {
+                        Button {
+                            Task { await model.checkReachability() }
+                        } label: {
+                            Label(model.probing
+                                  ? tr("正在测试…", "Testing…")
+                                  : tr("测试公网可达性", "Test public reachability"),
+                                  systemImage: "network")
+                        }
+                        .disabled(model.probing)
+
+                        if let report = model.reachability {
+                            Label(report.detail ?? "",
+                                  systemImage: report.reachable ? "checkmark.seal.fill"
+                                             : (report.sameLan ? "questionmark.circle" : "exclamationmark.triangle"))
+                                .font(.caption)
+                                .foregroundStyle(report.reachable ? Color.green
+                                                 : (report.sameLan ? Color.secondary : Color.orange))
+                                .fixedSize(horizontal: false, vertical: true)
+                        } else {
+                            Text(tr("最准的测法：手机关掉 Wi-Fi、用蜂窝数据再点这个按钮。在同一个 Wi-Fi 下测出来的结果不作数。",
+                                    "Most accurate: turn off Wi-Fi on the phone, use cellular data, then tap this. A result measured on the same Wi-Fi does not count."))
+                                .font(.caption2).foregroundStyle(.tertiary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+
                     // Apple Watch 的同步入口。
                     //
                     // 手表没有摄像头也没有键盘，因此它**从不自己配对** ——

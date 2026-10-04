@@ -47,9 +47,10 @@ ok "内核就绪"
 
 "$BIN" remote enable --port "$PORT" --json >/dev/null || bad "开启远程访问失败"
 PAIR="$("$BIN" remote pair --role operator --label "mizar-acceptance" --json)"
-CODE="$(printf '%s' "$PAIR" | json_field manual_code)"
+# 配对密钥从二维码载荷里取 —— 它是唯一的配对凭证（六位码已删除）。
+CODE="$(printf '%s' "$PAIR" | python3 -c 'import json,sys; print(json.loads(json.load(sys.stdin)["qr_payload"])["secret"])')"
 PAYLOAD="$(printf '%s' "$PAIR" | json_field qr_payload)"
-[ -n "$CODE" ] && ok "配对会话已生成（${CODE}）" || { bad "没有拿到配对码"; exit 1; }
+[ -n "$CODE" ] && ok "配对会话已生成（密钥 ${CODE:0:8}…）" || { bad "没有拿到配对码"; exit 1; }
 
 head_ "MizarKit：扫码路径 —— 真 TLS + 二维码里的公钥指纹"
 if swift run --quiet MizarAcceptance pair-qr "$PAYLOAD" "$STATE" "127.0.0.1:$PORT" 2>&1 | sed 's/^/  /'; then
@@ -58,15 +59,16 @@ else
   bad "扫码配对失败"
 fi
 
-head_ "MizarKit：手输路径 —— 地址 + 六位码，指纹由用户核对"
-# 会话是一次性的，因此手输路径要单独开一个。
-PAIR2="$("$BIN" remote pair --role viewer --label "mizar-code" --json)"
-CODE2="$(printf '%s' "$PAIR2" | json_field manual_code)"
+head_ "MizarKit：配对链接 —— 与扫码走同一条路径"
+# 六位码那条路已删除。配对链接就是它的替代：与二维码装的是同一份载荷，
+# 只是载体不同 —— 传过去、粘一次即可。会话是一次性的，因此单独开一个。
+PAIR2="$("$BIN" remote pair --role viewer --label "mizar-link" --json)"
+LINK2="$(printf '%s' "$PAIR2" | json_field qr_link)"
 STATE2="$(mktemp -d "${TMPDIR:-/tmp}/mizar-state2.XXXXXX")"
-if swift run --quiet MizarAcceptance pair-code "127.0.0.1:$PORT" "$CODE2" "$STATE2" 2>&1 | sed 's/^/  /'; then
-  ok "手输配对通过（返回了可核对的指纹）"
+if swift run --quiet MizarAcceptance pair-link "$LINK2" "$STATE2" 2>&1 | sed 's/^/  /'; then
+  ok "配对链接通过（与扫码同一条路径）"
 else
-  bad "手输配对失败"
+  bad "配对链接失败"
 fi
 rm -rf "$STATE2"
 

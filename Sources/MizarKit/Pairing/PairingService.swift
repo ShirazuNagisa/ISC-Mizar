@@ -65,17 +65,6 @@ public struct PairingService: Sendable {
         public let server: ServerInfo
     }
 
-    /// 手输路径的中间结果：**还没落库**，等用户核对指纹。
-    public struct PendingManualPairing: Sendable, Identifiable {
-        public var id: String { outcome.record.id }
-
-        public let outcome: Outcome
-        public let baseURL: URL
-        /// 用户要拿去与 Phecda 屏幕上核对的那一串。
-        public var fingerprintShort: String { outcome.server.fingerprintShort ?? "" }
-        public var serverName: String { outcome.server.name }
-    }
-
     private let language: String
     private let timeout: TimeInterval
     private let makeTransport: TransportFactory
@@ -88,9 +77,10 @@ public struct PairingService: Sendable {
     }
 
     /// 默认的传输工厂：真实的 HTTPS。
-    public static let defaultTransport: TransportFactory = { url, spki, token, language in
-        HTTPTransport(configuration: .init(baseURL: url, token: token,
-                                           pinnedSPKI: spki, language: language))
+    public static let defaultTransport: TransportFactory = { spec in
+        HTTPTransport(configuration: .init(baseURL: spec.baseURL, token: spec.token,
+                                           trust: spec.trust, pinnedSPKI: spec.pinnedSPKI,
+                                           language: spec.language, timeout: spec.timeout))
     }
 
     // MARK: - 扫码路径
@@ -118,38 +108,15 @@ public struct PairingService: Sendable {
 
     // MARK: - 手输路径
 
-    /// 用地址 + 六位码探测一台服务端。
-    ///
-    /// 返回的结果**没有落库**：调用方必须把 `fingerprintShort` 显示给用户，
-    /// 与 Phecda 上的那一串核对，确认之后再调用 `commit`。
-    public func probe(address: String, code: String, scheme: String = "https",
-                      device: DeviceInfo) async throws -> PendingManualPairing {
-        guard let normalized = PairingCode.normalize(code) else {
-            throw PairingError.rejected("配对码应当是六位字母或数字。")
-        }
-        // 地址允许用户输入 `host:port`、`https://host:port` 或带路径的
-        // 完整 URL —— 人们会从各种地方把它复制过来。
-        guard let baseURL = Self.normalize(address: address, scheme: scheme) else {
-            throw PairingError.rejected("地址无法解析，请检查后重试。")
-        }
-
-        let outcome = try await pair(at: baseURL, pinnedSPKI: nil,
-                                     credential: .code(normalized),
-                                     device: device, payload: nil)
-        return PendingManualPairing(outcome: outcome, baseURL: baseURL)
-    }
-
     // MARK: - 内部
 
     private enum Credential {
         case secret(String)
-        case code(String)
     }
 
-    /// 请求体。两个字段二选一。
+    /// 请求体。**只有密钥**：六位码那条路已删除。
     private struct PairRequest: Encodable {
         var secret: String?
-        var code: String?
         var device: DeviceInfo
     }
 
@@ -163,13 +130,17 @@ public struct PairingService: Sendable {
     private func pair(at baseURL: URL, pinnedSPKI: String?, credential: Credential,
                       device: DeviceInfo, payload: PairingPayload?) async throws -> Outcome {
         // 配对路径是唯一免鉴权的路径，因此传输上不带令牌。
-        let transport = makeTransport(baseURL, pinnedSPKI, "", language)
+        // 配对路径是唯一免鉴权的路径，因此传输上不带令牌。
+        // 有指纹时固定它（扫码/链接路径）；没有时首次使用。
+        let trust: TrustMode = pinnedSPKI == nil ? .trustOnFirstUse : .pin
+        let transport = makeTransport(TransportSpec(
+            baseURL: baseURL, trust: trust, pinnedSPKI: pinnedSPKI,
+            token: "", language: language, timeout: timeout))
         let client = KernelClient(transport: transport)
 
         var body = PairRequest(device: device)
         switch credential {
         case .secret(let value): body.secret = value
-        case .code(let value): body.code = value
         }
 
         // 手工编码与解码，而不是走 KernelAPI 的泛型入口：配对响应只在
@@ -255,32 +226,6 @@ public struct PairingService: Sendable {
         let host = url.host() ?? ""
         let port = url.port.map { ":\($0)" } ?? ""
         return host.contains(":") ? "[\(host)]\(port)" : "\(host)\(port)"
-    }
-
-    /// 把用户输入的地址规范化。
-    ///
-    /// 接受 `host:port`、`https://host:port`、以及带路径的完整 URL ——
-    /// 人们会从浏览器地址栏、聊天记录、Phecda 的地址列表里把它复制过来，
-    /// 而每一种都带着不同的前缀。
-    static func normalize(address: String, scheme: String) -> URL? {
-        let trimmed = address.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-
-        if trimmed.contains("://") {
-            guard let url = URL(string: trimmed), let host = url.host(), !host.isEmpty else { return nil }
-            // 只保留 scheme/host/port：路径与查询对内核接口没有意义，
-            // 留着反而会让 URL(string:relativeTo:) 拼出奇怪的地址。
-            var components = URLComponents()
-            components.scheme = url.scheme
-            components.host = host
-            components.port = url.port
-            return components.url
-        }
-
-        guard let url = URL(string: "\(scheme)://\(trimmed)"), let host = url.host(), !host.isEmpty else {
-            return nil
-        }
-        return url
     }
 
     /// 把内核的错误码翻译成配对语义。

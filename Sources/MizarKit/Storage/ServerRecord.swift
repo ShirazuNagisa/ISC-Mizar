@@ -37,6 +37,14 @@ public struct ServerRecord: Codable, Sendable, Identifiable, Equatable {
     /// 那些是谁。
     public var watchDeviceID: String?
 
+    /// 公网子域名（由内核在用户的域名下自动建立）。
+    ///
+    /// 有它时这一条走**标准 TLS 信任链**，而不是固定指纹：公网路径
+    /// 用的是受信任的证书，而固定指纹会在每次续期（换密钥）之后失效。
+    public var publicHost: String?
+    /// 公网路径的端口。为空表示与局域网相同。
+    public var publicPort: Int?
+
     public init(id: String = UUID().uuidString,
                 name: String,
                 scheme: String,
@@ -47,7 +55,9 @@ public struct ServerRecord: Codable, Sendable, Identifiable, Equatable {
                 lastSeenAt: Date? = nil,
                 createdAt: Date = Date(),
                 notificationsEnabled: Bool = false,
-                watchDeviceID: String? = nil) {
+                watchDeviceID: String? = nil,
+                publicHost: String? = nil,
+                publicPort: Int? = nil) {
         self.id = id
         self.name = name
         self.scheme = scheme
@@ -59,6 +69,8 @@ public struct ServerRecord: Codable, Sendable, Identifiable, Equatable {
         self.createdAt = createdAt
         self.notificationsEnabled = notificationsEnabled
         self.watchDeviceID = watchDeviceID
+        self.publicHost = publicHost
+        self.publicPort = publicPort
     }
 
     /// 供手表使用的副本：角色强制为只读。
@@ -82,11 +94,52 @@ public struct ServerRecord: Codable, Sendable, Identifiable, Equatable {
         return [last] + addresses.filter { $0 != last }
     }
 
-    public func baseURLs() -> [URL] {
-        orderedAddresses().compactMap { URL(string: "\(scheme)://\($0)") }
+    /// 一条可以尝试的地址，连同它该用的信任模型。
+    ///
+    /// # 为什么信任模型要挂在**每一条地址**上
+    ///
+    /// 同一台服务端可以两条路都通：在家里走局域网（自签证书，
+    /// 可信来源是配对时固定下来的公钥指纹），在外面走公网域名
+    /// （受信任证书，可信来源是系统信任链）。
+    ///
+    /// 给整台服务端只记一个信任模型的话，两条路里必然有一条是错的 ——
+    /// 而在公网那条上用固定指纹的后果特别隐蔽：证书续期换密钥之后
+    /// 就再也连不上，而症状是"过一阵子连不上，重启一下又好了"。
+    public func candidates() -> [ServerCandidate] {
+        var out: [ServerCandidate] = []
+        for address in orderedAddresses() {
+            out.append(ServerCandidate(address: address, trust: .pin))
+        }
+        // 公网域名排在最后：在家时局域网两秒内就通了，而公网那条
+        // 就算通也要绕出去再回来。`lastGoodAddress` 会把上次成功的
+        // 那条提到最前，因此常用网络下不会每次都先等局域网超时。
+        if let host = publicHost, !host.isEmpty {
+            let address = publicPort.map { "\(host):\($0)" } ?? host
+            if !out.contains(where: { $0.address == address }) {
+                out.append(ServerCandidate(address: address, trust: .system))
+            }
+        }
+        return out
     }
 
     public var canWrite: Bool { role == "operator" }
+}
+
+/// 一条可以尝试的地址，连同它该用的信任模型。
+public struct ServerCandidate: Sendable, Hashable, Identifiable {
+    public var address: String
+    public var trust: TrustMode
+
+    public var id: String { address }
+
+    public init(address: String, trust: TrustMode) {
+        self.address = address
+        self.trust = trust
+    }
+
+    public func baseURL(scheme: String) -> URL? {
+        URL(string: "\(scheme)://\(address)")
+    }
 }
 
 /// 服务端列表的持久化。
