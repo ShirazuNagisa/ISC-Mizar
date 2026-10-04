@@ -1,0 +1,16 @@
+.build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+.DS_Store
+
+# 验收脚本产出的截图。它们是本机跑出来的证据，不是要入库的产物 ——
+# 每次运行都会被重新写一遍。
+Build/
+
+# SwiftPM / Xcode 的每用户状态。里面只有"谁在什么时候把哪个方案拖到了
+# 什么位置"这类本机偏好 —— 三件里有两件是 xcuserdata。
+.swiftpm/*/
+!.swiftpm/xcode/
+.swiftpm/xcode/package.xcworkspace/xcuserdata/
+.swiftpm/xcode/xcuserdata/

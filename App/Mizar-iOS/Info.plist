@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleName</key><string>ISC Mizar</string>
+<key>CFBundleDisplayName</key><string>ISC Mizar</string>
+<key>CFBundleIdentifier</key><string>app.isc.mizar</string>
+<key>CFBundleExecutable</key><string>$(EXECUTABLE_NAME)</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleShortVersionString</key><string>0.1.0</string>
+<key>CFBundleVersion</key><string>1</string>
+<key>LSRequiresIPhoneOS</key><true/>
+<key>UILaunchScreen</key><dict/>
+<key>UISupportedInterfaceOrientations</key><array>
+  <string>UIInterfaceOrientationPortrait</string>
+  <string>UIInterfaceOrientationLandscapeLeft</string>
+  <string>UIInterfaceOrientationLandscapeRight</string>
+</array>
+<key>CFBundleDevelopmentRegion</key><string>en</string>
+<key>CFBundleLocalizations</key><array><string>en</string><string>zh-Hans</string></array>
+<!-- 相机：扫码配对。描述会显示在权限弹窗上。 -->
+<key>NSCameraUsageDescription</key>
+<string>扫描 Phecda 上的配对二维码，用于连接你的服务端。</string>
+<!-- 本地网络：手机要连的是局域网里的那台机器。没有这一条，
+     iOS 会在第一次请求时静默失败（而错误信息完全不指向权限）。 -->
+<key>NSLocalNetworkUsageDescription</key>
+<string>连接同一局域网内的 Phecda 服务端以查看状态与资源占用。</string>
+<key>NSBonjourServices</key><array>
+  <string>_isc._tcp</string>
+</array>
+<!-- 这个应用只连自签证书的 HTTPS 服务端，不上任何公网站点。
+     ATS 约束的是 TLS 版本与密码套件（我们满足 TLS 1.2+），
+     证书的信任评估由 URLSession 的挑战回调接管（见 SpkiPinning）。 -->
+<key>WKAppBundleIdentifier</key><string>app.isc.mizar.watchkitapp</string>
+<!-- 后台刷新与远程通知。fetch 是兜底轮询，remote-notification 让系统
+     在收到静默推送时唤醒应用（有配额，不能当主力用）。 -->
+<key>UIBackgroundModes</key><array>
+  <string>fetch</string>
+  <string>remote-notification</string>
+</array>
+<!-- 这一条必须与 BackgroundRefresh.identifier 逐字一致：不一致时系统
+     **静默拒绝**注册，而症状是"后台刷新永远不跑"，没有任何错误信息。 -->
+<key>BGTaskSchedulerPermittedIdentifiers</key><array>
+  <string>app.isc.mizar.refresh</string>
+</array>
+<!-- 配对链接。`isc-remote://pair?d=<base64url payload>` 正是 MizarKit
+     里 PairingPayload.link() 产出的那一种 —— 也就是说**同一条链接**
+     既能被复制粘贴，也能直接点开。
+     它带来两件真实的事：Phecda 可以把链接交给系统去打开（不必让用户
+     对着屏幕扫），以及验收脚本能在模拟器上把整条配对链路跑一遍。 -->
+<key>CFBundleURLTypes</key><array><dict>
+  <key>CFBundleURLName</key><string>app.isc.mizar.pairing</string>
+  <key>CFBundleURLSchemes</key><array><string>isc-remote</string></array>
+</dict></array>
+</dict></plist>

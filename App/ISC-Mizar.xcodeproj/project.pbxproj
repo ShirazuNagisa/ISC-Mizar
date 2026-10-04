@@ -1,0 +1,391 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin XCLocalSwiftPackageReference section */
+		A100000000000000000100 /* XCLocalSwiftPackageReference ".." */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = "..";
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		A100000000000000000101 /* MizarApp */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = MizarApp;
+		};
+		A100000000000000000104 /* MizarScreens */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = MizarScreens;
+		};
+/* End XCSwiftPackageProductDependency section */
+
+/* Begin PBXFileReference section */
+		A100000000000000000001 /* ISC Mizar.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "ISC Mizar.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		A100000000000000000002 /* ISC Mizar Watch.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "ISC Mizar Watch.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		A100000000000000000010 /* Mizar-iOS */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				A100000000000000000110 /* Exceptions for "Mizar-iOS" folder in "Mizar" target */,
+			);
+			path = "Mizar-iOS";
+			sourceTree = "<group>";
+		};
+		A100000000000000000011 /* Mizar-watchOS */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				A100000000000000000111 /* Exceptions for "Mizar-watchOS" folder in "MizarWatch" target */,
+			);
+			path = "Mizar-watchOS";
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		A100000000000000000110 /* Exceptions for "Mizar-iOS" folder in "Mizar" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = A100000000000000000040 /* Mizar */;
+		};
+		A100000000000000000111 /* Exceptions for "Mizar-watchOS" folder in "MizarWatch" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = A100000000000000000041 /* MizarWatch */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		A100000000000000000020 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (A100000000000000000102 /* MizarApp in Frameworks */, A100000000000000000105 /* MizarScreens in Frameworks */, ); runOnlyForDeploymentPostprocessing = 0; };
+		A100000000000000000021 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (A100000000000000000103 /* MizarApp in Frameworks */, ); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		A100000000000000000030 = {
+			isa = PBXGroup;
+			children = (
+				A100000000000000000010 /* Mizar-iOS */,
+				A100000000000000000011 /* Mizar-watchOS */,
+				A100000000000000000031 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		A100000000000000000031 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				A100000000000000000001 /* ISC Mizar.app */,
+				A100000000000000000002 /* ISC Mizar Watch.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		A100000000000000000040 /* Mizar */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A100000000000000000060 /* Build configuration list for PBXNativeTarget "Mizar" */;
+			buildPhases = (
+				A100000000000000000022 /* Sources */,
+				A100000000000000000020 /* Frameworks */,
+				A100000000000000000024 /* Resources */,
+				A100000000000000000026 /* Embed Watch Content */,
+			);
+			buildRules = ();
+			dependencies = (
+				A100000000000000000051 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				A100000000000000000010 /* Mizar-iOS */,
+			);
+			packageProductDependencies = (
+				A100000000000000000101 /* MizarApp */,
+				A100000000000000000104 /* MizarScreens */,
+			);
+			name = Mizar;
+			productName = Mizar;
+			productReference = A100000000000000000001 /* ISC Mizar.app */;
+			productType = "com.apple.product-type.application";
+		};
+		A100000000000000000041 /* MizarWatch */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A100000000000000000061 /* Build configuration list for PBXNativeTarget "MizarWatch" */;
+			buildPhases = (
+				A100000000000000000023 /* Sources */,
+				A100000000000000000021 /* Frameworks */,
+				A100000000000000000025 /* Resources */,
+			);
+			buildRules = ();
+			dependencies = ();
+			fileSystemSynchronizedGroups = (
+				A100000000000000000011 /* Mizar-watchOS */,
+			);
+			packageProductDependencies = (
+				A100000000000000000101 /* MizarApp */,
+			);
+			name = MizarWatch;
+			productName = MizarWatch;
+			productReference = A100000000000000000002 /* ISC Mizar Watch.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A100000000000000000070 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2700;
+				LastUpgradeCheck = 2700;
+				TargetAttributes = {
+					A100000000000000000040 = { CreatedOnToolsVersion = 27.0; };
+					A100000000000000000041 = { CreatedOnToolsVersion = 27.0; };
+				};
+			};
+			buildConfigurationList = A100000000000000000062 /* Build configuration list for PBXProject "ISC-Mizar" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				"zh-Hans",
+				Base,
+			);
+			mainGroup = A100000000000000000030;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			packageReferences = (
+				A100000000000000000100 /* XCLocalSwiftPackageReference ".." */,
+			);
+			productRefGroup = A100000000000000000031 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				A100000000000000000040 /* Mizar */,
+				A100000000000000000041 /* MizarWatch */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		A100000000000000000024 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		A100000000000000000025 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		A100000000000000000022 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		A100000000000000000023 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		A100000000000000000026 /* Embed Watch Content */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "$(CONTENTS_FOLDER_PATH)/Watch";
+			dstSubfolderSpec = 16;
+			files = (
+				A100000000000000000027 /* ISC Mizar Watch.app in Embed Watch Content */,
+			);
+			name = "Embed Watch Content";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXBuildFile section */
+		A100000000000000000102 /* MizarApp in Frameworks */ = {isa = PBXBuildFile; productRef = A100000000000000000101 /* MizarApp */; };
+		A100000000000000000103 /* MizarApp in Frameworks */ = {isa = PBXBuildFile; productRef = A100000000000000000101 /* MizarApp */; };
+		A100000000000000000105 /* MizarScreens in Frameworks */ = {isa = PBXBuildFile; productRef = A100000000000000000104 /* MizarScreens */; };
+		A100000000000000000027 /* ISC Mizar Watch.app in Embed Watch Content */ = {isa = PBXBuildFile; fileRef = A100000000000000000002 /* ISC Mizar Watch.app */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+/* End PBXBuildFile section */
+
+/* Begin PBXTargetDependency section */
+		A100000000000000000051 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = A100000000000000000041 /* MizarWatch */;
+			targetProxy = A100000000000000000050 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin PBXContainerItemProxy section */
+		A100000000000000000050 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A100000000000000000070 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A100000000000000000041;
+			remoteInfo = MizarWatch;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin XCConfigurationList section */
+		A100000000000000000060 /* Build configuration list for PBXNativeTarget "Mizar" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A100000000000000000090 /* Debug */,
+				A100000000000000000091 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A100000000000000000061 /* Build configuration list for PBXNativeTarget "MizarWatch" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A100000000000000000092 /* Debug */,
+				A100000000000000000093 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A100000000000000000062 /* Build configuration list for PBXProject "ISC-Mizar" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A100000000000000000094 /* Debug */,
+				A100000000000000000095 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCBuildConfiguration section */
+		A100000000000000000094 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = ("DEBUG=1", "$(inherited)");
+				IPHONEOS_DEPLOYMENT_TARGET = 27.0;
+				WATCHOS_DEPLOYMENT_TARGET = 27.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		A100000000000000000095 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 27.0;
+				WATCHOS_DEPLOYMENT_TARGET = 27.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_VERSION = 6.0;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		A100000000000000000090 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "Mizar-iOS/Info.plist";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks");
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = app.isc.mizar;
+				PRODUCT_NAME = "ISC Mizar";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		A100000000000000000091 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "Mizar-iOS/Info.plist";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks");
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = app.isc.mizar;
+				PRODUCT_NAME = "ISC Mizar";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		A100000000000000000092 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "Mizar-watchOS/Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks");
+				MARKETING_VERSION = 0.1.0;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = app.isc.mizar.watchkitapp;
+				PRODUCT_NAME = "ISC Mizar Watch";
+				SDKROOT = watchos;
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = 4;
+			};
+			name = Debug;
+		};
+		A100000000000000000093 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "Mizar-watchOS/Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks");
+				MARKETING_VERSION = 0.1.0;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = app.isc.mizar.watchkitapp;
+				PRODUCT_NAME = "ISC Mizar Watch";
+				SDKROOT = watchos;
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = 4;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+	};
+	rootObject = A100000000000000000070 /* Project object */;
+}
