@@ -126,7 +126,7 @@ fi
 # 忘了随设备信息上报、或者内核没存，三种情况在这里都会显形，而在客户端
 # 内部怎么断言都看不出来。
 if printf '%s' "$DEVICES" | grep -q '"app_version": *"0\.1\.0"'; then
-  ok "服务端看到的是 Mizar v0.1.0"
+  ok "服务端看到的是 Mizar v0.2.0"
 else
   bad "服务端没有收到应用版本号"
 fi

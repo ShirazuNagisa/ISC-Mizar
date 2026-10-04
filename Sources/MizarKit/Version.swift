@@ -23,7 +23,7 @@ import Foundation
 public enum MizarVersion {
 
     /// 语义化版本号，不带 `v` 前缀（与 Info.plist 对齐）。
-    public static let current = "0.1.0"
+    public static let current = "0.2.0"
 
     /// 展示用的形式。
     public static var display: String { "v\(current)" }
