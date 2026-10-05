@@ -36,6 +36,30 @@ public enum Theme {
     /// 指标卡的圆角。
     public static let cardRadius: CGFloat = 14
     public static let rowRadius: CGFloat = 10
+
+    /// 内容卡的底色。
+    ///
+    /// 取的是"分组内容里的卡片"那一档语义色，而不是 `.background`：
+    /// 亮色下两者都是白（卡片靠那条发丝描边立住，与玻璃原来的观感一致），
+    /// 而暗色下这一档是 #1C1C1E —— 恰好就是玻璃卡片原来呈现出来的那个灰。
+    /// 用 `.background` 的话暗色下卡片会与页面同色，整屏糊成一片黑，
+    /// 那才是"为了性能把界面搞难看"。
+    ///
+    /// 为什么不用 SwiftUI 的 `.background.secondary`：那是**另一档**
+    /// （`secondarySystemBackground`），亮色下是浅灰而不是白 —— 卡片会
+    /// 从"白底 + 描边"变成"灰底"，那是比换掉玻璃更大的视觉改动。
+    ///
+    /// 三个分支只为了 macOS 那一个：`Color(uiColor:)` 在 watchOS 上也
+    /// 编译得过（那边有 UIKit，只是色板不同），而 `NSColor` 不在。
+    public static var cardFill: Color {
+        #if os(iOS)
+        Color(uiColor: .secondarySystemGroupedBackground)
+        #elseif os(macOS)
+        Color(nsColor: .controlBackgroundColor)
+        #else
+        Color.gray.opacity(0.25)
+        #endif
+    }
 }
 
 /// 把内核的状态字符串映射成颜色、文案与图标。

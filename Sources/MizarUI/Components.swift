@@ -48,6 +48,53 @@ extension Int64 {
     }
 }
 
+extension View {
+    /// 一张**内容卡**的表面。
+    ///
+    /// # 为什么不是 Liquid Glass
+    ///
+    /// 玻璃是**导航层**的材质：工具栏、页签栏、浮在内容之上的控件。
+    /// 把它铺到每一张内容卡上，等于让卡片底下任何一处在动的东西都拖着
+    /// 玻璃一起重新采样与合成 —— 而概览页一屏就有六张卡，它们上面还压着
+    /// 一条浮动的玻璃页签栏。
+    ///
+    /// # 量出来的代价，以及它出现在什么时候
+    ///
+    /// 在 iPhone 18 Pro 模拟器上用一个与这里同构的隔离台（八张卡、一份
+    /// 骨架行、一条浮动的玻璃页签栏），计应用进程的 CPU 时间：
+    ///
+    ///	画面完全静止      玻璃 0.0%   不透明 0.0%   材质 0.0%
+    ///	卡片在滚动        玻璃 11.0%  不透明 6.2%   材质 4.9%
+    ///	卡里有呼吸动画    玻璃 6.3%   不透明 3.1%   材质 3.6%
+    ///
+    /// （滚动那三行各测三遍，波动在 ±0.4 个百分点以内。）
+    ///
+    /// 两件事值得记住：**静止时玻璃是免费的** —— 这一处换掉的不是"常驻
+    /// 开销"，而是"每一帧都在动的时候"的开销；而一旦内容在动，玻璃大约
+    /// 让代价翻倍，并且卡片越多越贵（12 张带呼吸动画时 8.5% 对 3.6%）。
+    ///
+    /// 这里只是应用进程自己花掉的时间。玻璃还有一部分成本落在渲染服务
+    /// 与 GPU 上，那是这个数字**看不到**的。
+    ///
+    /// # 为什么底色是 `Theme.cardFill` 而不是 `.regularMaterial`
+    ///
+    /// `.regularMaterial` 与不透明填充在滚动下互有胜负（4.9% 对 6.2%）、
+    /// 在呼吸动画下反过来（3.6% 对 3.1%），都在噪声范围内；不透明的那一个
+    /// 不需要每帧再合成一次模糊，因此选它。
+    ///
+    /// 代价要说清楚：卡片失去了玻璃那一层极淡的高光与透光感。亮色下几乎
+    /// 看不出差别（都是白底 + 一条边），暗色下比现在略平 —— 那个取值本身
+    /// 的理由写在 `Theme.cardFill` 上。
+    func contentCardSurface(cornerRadius: CGFloat = Theme.cardRadius) -> some View {
+        self
+            .background(Theme.cardFill, in: .rect(cornerRadius: cornerRadius))
+            .overlay {
+                RoundedRectangle(cornerRadius: cornerRadius)
+                    .strokeBorder(.separator, lineWidth: 0.5)
+            }
+    }
+}
+
 /// 一张指标卡。
 ///
 /// # 高度是**钉死**的
@@ -116,7 +163,7 @@ public struct MetricCard: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
-        .glassEffect(.regular, in: .rect(cornerRadius: Theme.cardRadius))
+        .contentCardSurface()
     }
 }
 
@@ -278,7 +325,7 @@ public struct Card<Content: View>: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(14)
-        .glassEffect(.regular, in: .rect(cornerRadius: Theme.cardRadius))
+        .contentCardSurface()
     }
 }
 
