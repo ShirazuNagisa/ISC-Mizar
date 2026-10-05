@@ -116,15 +116,38 @@ public struct HTTPTransport: KernelTransport {
         return try await perform(request)
     }
 
+    /// 长轮询事件。
+    ///
+    /// # 这里**不能**用 `URLComponents(resolvingAgainstBaseURL: false)`
+    ///
+    /// `url(for:)` 返回的是 `URL(string:relativeTo:)` 的结果 —— 它的 host
+    /// 在 `baseURL` 里。而 `resolvingAgainstBaseURL: false` 会让
+    /// `URLComponents` 把这个 URL 当成**纯相对路径**，于是 `components.url`
+    /// 变成：
+    ///
+    ///     /v1/events/poll?since=0&timeout_ms=25000
+    ///
+    /// 一个没有 host 的 URL。`URLSession` 对它的回答是立刻返回
+    /// `-1002 不支持的URL` —— **没有网络往返**，所以重试再多次也永远
+    /// 不会成功，而日志里只会看到一串"不支持的URL"。
+    ///
+    /// 别的请求路径没这个问题：它们走 `makeRequest`，那里的 `URL` 仍然
+    /// 带着 base。只有这一条手工拼了 query，也就在这一条上踩了坑。
     public func pollEvents(since: Int64, timeoutMilliseconds: Int) async throws -> EventBatch {
-        var components = URLComponents(
-            url: try url(for: "/v1/events/poll"), resolvingAgainstBaseURL: false)
-        components?.queryItems = [
+        // `resolvingAgainstBaseURL: true`：把 base 解析进去，拿到的才是
+        // 一个绝对 URL。
+        guard var components = URLComponents(
+            url: try url(for: "/v1/events/poll"), resolvingAgainstBaseURL: true) else {
+            throw KernelError(code: "bad_request", message: "无法构造长轮询地址")
+        }
+        components.queryItems = [
             URLQueryItem(name: "since", value: String(since)),
             URLQueryItem(name: "timeout_ms", value: String(timeoutMilliseconds)),
         ]
-        guard let url = components?.url else {
-            throw KernelError(code: "bad_request", message: "无法构造长轮询地址")
+        guard let url = components.url, url.host != nil else {
+            // 兜底：没有 host 的 URL 会被 URLSession 立刻拒绝，而那个错误
+            // （"不支持的URL"）完全指不出这里。宁可在这里说清楚。
+            throw KernelError(code: "bad_request", message: "长轮询地址缺少 host")
         }
 
         // 请求超时必须**大于**长轮询自身的挂起时间，否则每一次空闲的

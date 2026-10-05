@@ -970,3 +970,39 @@ actor CountingTokenStore: TokenStore {
     let parsed = try PairingPayload.parse("  \n\(text)\n  ")
     #expect(parsed.secret == original.secret)
 }
+
+/// **长轮询的地址必须是绝对的。**
+///
+/// # 这条测试挡的是一个真机上真实发生过的 bug
+///
+/// `url(for:)` 返回的是 `URL(string:relativeTo:)` —— host 在 baseURL 里。
+/// 而 `URLComponents(resolvingAgainstBaseURL: false)` 会把它当成纯相对
+/// 路径，于是 `components.url` 变成：
+///
+///     /v1/events/poll?since=0&timeout_ms=25000
+///
+/// `URLSession` 对它的回答是**立刻**返回 `-1002 不支持的URL`，没有网络
+/// 往返。所以重试再多次也永远不会成功，而真机日志里只会看到一串
+/// "不支持的URL" —— 那个错误完全指不出"地址少了 host"。
+///
+/// 症状：事件流永远不工作、每 3 秒白试一次，而用户在真机上看到的是
+/// 界面持续卡顿。
+///
+/// 断言的是**构造方式本身**，而不是某一次请求的结果 —— 因为让这件事
+/// 出错的地方就在这里，把它钉住才能防止有人"简化"回去。
+@Test func eventPollingUsesAnAbsoluteURL() throws {
+    let base = URL(string: "https://192.168.1.10:8788")!
+    let relative = URL(string: "/v1/events/poll", relativeTo: base)!
+
+    // 正确的做法：把 base 解析进去，拿到的是绝对 URL。
+    let good = URLComponents(url: relative, resolvingAgainstBaseURL: true)
+    #expect(good?.url?.host == "192.168.1.10")
+    #expect(good?.url?.scheme == "https")
+    #expect(good?.url?.port == 8788)
+
+    // 错误做法会出什么事 —— 将来有人改回去时，这条断言告诉他为什么不能。
+    let bad = URLComponents(url: relative, resolvingAgainstBaseURL: false)
+    #expect(bad?.url?.host == nil, "resolvingAgainstBaseURL: false 会丢掉 host，这正是那个 bug")
+    #expect(bad?.url?.absoluteString.hasPrefix("/v1/events/poll") == true,
+            "丢掉了 host 的地址长这样 —— 与真机日志里那条逐字一致")
+}
