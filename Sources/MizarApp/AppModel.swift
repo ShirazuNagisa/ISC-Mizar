@@ -25,6 +25,12 @@ public final class AppModel {
     // MARK: 服务端列表
 
     public private(set) var servers: [ServerRecord] = []
+    /// 服务端列表是否已经读过一次（无论读出来是空的还是有内容）。
+    ///
+    /// 界面用它区分"还在读"与"确实一台都没有"：少了这个区分，冷启动的
+    /// 第一帧会显示"还没有服务端，去扫码添加" —— 而用户明明有三台，
+    /// 那句话会让人以为配置丢了。
+    public private(set) var hasLoadedServers = false
     /// 每台服务端当前的连接状态。列表页据此画状态点。
     public private(set) var states: [String: SessionState] = [:]
     public var selectedServerID: String?
@@ -67,6 +73,12 @@ public final class AppModel {
     private var metricsTask: Task<Void, Never>?
     private var eventTask: Task<Void, Never>?
     private var refreshTask: Task<Void, Never>?
+    /// 当前那一次"连接并拉全量"的后台任务。
+    ///
+    /// 它存在的理由只有一个：**用户切走时能把它掐掉**。切换服务器之后
+    /// 上一次连接的结果已经没有意义了，而一次连接可能包含七八条候选
+    /// 地址的探测 —— 不取消的话，切服务器就变成了"同时连两台"。
+    private var connectTask: Task<Void, Never>?
 
     /// 会话轮换计数。
     ///
@@ -87,14 +99,33 @@ public final class AppModel {
     // MARK: - 服务端列表
 
     public func loadServers() async {
-        servers = await pool.records()
+        await reloadRecords()
         if selectedServerID == nil { selectedServerID = servers.first?.id }
+
+        // 先把选中的那一台接上（它在后台跑，这里不等），再去探测其余的。
+        //
+        // 顺序反过来是有代价的：主界面的数据会排在其他服务端的探测
+        // 后面，而每一次探测都可能等满一次超时 —— 用户看得见的只有
+        // 当前这一台，它必须先走。
+        if let id = selectedServerID { startConnecting(id) }
+
         // 列表页上每台服务端只做一次轻量探测，**不**拉全部数据 ——
-        // 那会让打开列表变成一个几十次请求的动作。
-        for server in servers where states[server.id] == nil {
+        // 那会让打开列表变成一个几十次请求的动作。选中的那一台不走
+        // 这里：它要的不只是状态点，还有页签里的数据（上面那一步）。
+        for server in servers where server.id != selectedServerID && states[server.id] == nil {
             await probe(server.id)
         }
         await onServersChanged?()
+    }
+
+    /// 只读记录，不做任何网络动作。
+    ///
+    /// 与 `loadServers` 分开的理由是"谁在等它"：配对刚成功时弹窗要立刻
+    /// 关掉，而状态点可以稍后再来 —— 让用户为了几个小球多等几秒是
+    /// 没有道理的。
+    private func reloadRecords() async {
+        servers = await pool.records()
+        hasLoadedServers = true
     }
 
     /// 轻量探测：连上、拿到角色、更新状态点。
@@ -124,12 +155,49 @@ public final class AppModel {
     }
 
     /// 选择一台服务端并开始拉它的数据。
-    public func select(_ id: String) async {
-        guard selectedServerID != id else { return }
-        selectedServerID = id
-        // 清空上一台的数据：见类型头部关于"可选而不是保留上次值"的说明。
-        clearServerData()
-        await connectAndRefresh()
+    ///
+    /// # 它为什么**不再** `await` 连接
+    ///
+    /// 一次连接最长要等一轮候选地址的超时（见 `ServerSession.connect`），
+    /// 而调用它的是导航与推送深链 —— 让"点一下服务端"或"点开一条通知"
+    /// 等一次网络往返，用户看到的就是"点了没反应"。
+    ///
+    /// 现在它只做两件同步的事：把选中项改掉、把状态标成"连接中"
+    /// （界面据此**立刻**画出骨架），然后把连接交给后台任务。
+    public func select(_ id: String) {
+        if selectedServerID != id {
+            // 在途的刷新结果必须作废：否则一次慢请求会在切换之后
+            // 把上一台机器的数据写进当前视图（见 `generation`）。
+            generation += 1
+            selectedServerID = id
+            // 清空上一台的数据：见类型头部关于"可选而不是保留上次值"的说明。
+            clearServerData()
+        }
+        startConnecting(id)
+    }
+
+    /// 开始连接一台服务端，**不阻塞调用方**。
+    ///
+    /// `force` 为 false 时，已经连上且数据在手就不重复连：列表页每次
+    /// 刷新、详情页每次重新出现都会走到这里，而每一次重连都是七八条
+    /// 候选地址的探测。
+    private func startConnecting(_ id: String, force: Bool = false) {
+        if !force, states[id] == .online, lastRefresh != nil { return }
+        // 状态先落到"连接中"：界面据此**立刻**画骨架，
+        // 而不是等连接结束才决定显示什么。
+        states[id] = .connecting
+        // 一次只连一台：前一个连接还在跑时它已经过时了（用户切走了），
+        // 让它继续只会多占一份网络与一份令牌探测。
+        connectTask?.cancel()
+        connectTask = Task { [weak self] in
+            await self?.connectAndRefresh()
+        }
+    }
+
+    /// 用户手动重试（"重试"按钮、下拉刷新）。
+    public func retry() {
+        guard let id = selectedServerID else { return }
+        startConnecting(id, force: true)
     }
 
     private func clearServerData() {
@@ -172,9 +240,16 @@ public final class AppModel {
 
     private func adopt(_ outcome: PairingService.Outcome) async throws -> ServerRecord {
         _ = try await pool.add(outcome)
-        await loadServers()
+        // 先选中，再读记录，**不**等连接。
+        //
+        // 配对弹窗要在这之后立刻关掉：用户要看到的是"配对成功了"，
+        // 而数据由详情页的骨架自己填。原来这里等的是完整的一次连接
+        // 加一次全量，于是扫完码之后会僵在"添加服务端"的转圈上。
+        generation += 1
         selectedServerID = outcome.record.id
-        await connectAndRefresh()
+        clearServerData()
+        await reloadRecords()
+        if let id = selectedServerID { startConnecting(id) }
         return outcome.record
     }
 
@@ -208,10 +283,30 @@ public final class AppModel {
     // MARK: - 刷新
 
     /// 连接当前服务端并拉一次全量。
+    ///
+    /// 它是**后台任务**的入口（见 `select` 与 `startConnecting`），
+    /// 因此不假设调用方在等它，也不假设中途没有被取消。
     public func connectAndRefresh() async {
+        // 冷启动时应用壳的 `.task` 与列表页的 `.task` 是并发跑的：
+        // 读过记录不代表已经有人填过 `selectedServerID`。少了这一段，
+        // 冷启动有一半的概率什么都不连 —— 界面上是四个空页签。
+        if selectedServerID == nil {
+            servers = await pool.records()
+            hasLoadedServers = true
+            selectedServerID = servers.first?.id
+        }
         guard let id = selectedServerID else { return }
+
+        states[id] = .connecting
+        // "连接中"不能是终态：被取消（用户切走了）时如果不落一个确定的
+        // 状态，界面会永远停在骨架屏上，连"重试"都出不来。
+        defer { if states[id] == .connecting { states[id] = .idle } }
+
         do {
             let state = try await pool.connect(id: id)
+            // 在途期间用户可能已经切到别的服务器：这一批结果属于上一台，
+            // 写进去会让界面显示另一台机器的状态与数据。
+            guard !Task.isCancelled, selectedServerID == id else { return }
             states[id] = state
             guard state == .online else { return }
             if let session = try? await pool.session(for: id) {
@@ -225,15 +320,19 @@ public final class AppModel {
                 let plan = currentServerInfo?.public
                 try? await pool.setPublicHost(plan?.host, port: plan?.port, for: id)
             }
+            guard !Task.isCancelled, selectedServerID == id else { return }
             await refreshAll()
+            guard !Task.isCancelled, selectedServerID == id else { return }
             startMetricsPolling()
             startEventPolling()
             await onServersChanged?()
         } catch let error as KernelError {
+            guard !Task.isCancelled, selectedServerID == id else { return }
             states[id] = error.needsPairing
                 ? SessionState.needsPairing(error.message)
                 : SessionState.unreachable(error.message)
         } catch {
+            guard !Task.isCancelled, selectedServerID == id else { return }
             states[id] = SessionState.unreachable(error.localizedDescription)
         }
     }
@@ -273,6 +372,15 @@ public final class AppModel {
         if let value = results.6 { proxyStatus = value }
         lastRefresh = Date()
     }
+
+    /// 当前这台服务端的数据是否已经拿到过至少一次。
+    ///
+    /// # 界面为什么要问这个
+    ///
+    /// 数据字段为空有两种完全不同的含义：**还没有拉到**（要画占位骨架）
+    /// 与**确实没有内容**（"还没有站点"）。少了这个区分，连接中的那几秒
+    /// 界面上写的是"还没有站点" —— 一句让人以为配置丢了的话。
+    public var hasLoadedData: Bool { lastRefresh != nil }
 
     public func refreshMetrics() async {
         guard let id = selectedServerID,
@@ -415,6 +523,10 @@ public final class AppModel {
     private func markCurrentUnauthorized(_ detail: String) async {
         guard let id = selectedServerID, let session = try? await pool.session(for: id) else { return }
         await session.markUnauthorized(detail)
+        // 服务端拒绝了这份令牌：缓存里那一份不能再用了。下一次连接必须
+        // 重新读 Keychain —— 用户可能刚在别处重新配对过，而继续用旧的
+        // 只会重连出同一个 401。
+        await pool.forgetToken(id: id)
         stopPolling()
     }
 
@@ -461,6 +573,9 @@ public final class AppModel {
                     guard !Task.isCancelled else { return }
                     if error.needsPairing {
                         self.states[id] = .needsPairing(error.message)
+                        // 长轮询先于重连发现令牌失效 —— 同样要把缓存里
+                        // 那一份丢掉，否则重连会拿它再撞一次 401。
+                        await self.pool.forgetToken(id: id)
                         return
                     }
                     // 网络抖动不是错误：等一会儿再来。用户不需要知道
@@ -489,8 +604,21 @@ public final class AppModel {
         stopPolling()
     }
 
+    /// 回到前台。
+    ///
+    /// 它**不**等连接完成：`scenePhase` 回到 active 时界面要立刻可用，
+    /// 而连接最长要等一轮候选地址的超时。数据到了由 `states` 与各个
+    /// 数据字段自己通知界面。
+    ///
+    /// `force`：从后台回来时必须重新连一次（长轮询已经停了，手上的
+    /// 快照也可能已经过期），因此这里刻意不走"已经连上就跳过"的捷径。
     public func enterForeground() async {
-        await connectAndRefresh()
+        if servers.isEmpty {
+            servers = await pool.records()
+            hasLoadedServers = true
+        }
+        if selectedServerID == nil { selectedServerID = servers.first?.id }
+        if let id = selectedServerID { startConnecting(id, force: true) }
     }
 
     // MARK: - 小工具

@@ -261,10 +261,22 @@ public actor ServerStore {
 }
 
 /// 设备令牌的存放处。
+///
+/// # 为什么是 `async` 而不是同步协议
+///
+/// Keychain 的 `SecItem*` 是一次到 `securityd` 的**同步 XPC**，真机上
+/// 单次从 10 ms 起、锁屏或刚启动时到 100 ms 量级。同步协议把这个代价
+/// 强加给**调用方所在的线程或执行器**：主 actor 上会直接卡住界面，
+/// 而 `ServerPool` 这个 actor 上排着四条轮询循环的会话查询 ——
+/// 一次 Keychain 命中会让它们全部等在后面（优先级反转）。
+///
+/// 改成 `async` 之后，"在哪里承担这段阻塞"变成**实现**的选择
+/// （见 `KeychainTokenStore` 的专用队列），而调用方在等待期间一定
+/// 是让出的。这不是为了并发而并发：它换来的是"取令牌时界面照常响应"。
 public protocol TokenStore: Sendable {
-    func token(for serverID: String) throws -> String?
-    func setToken(_ token: String?, for serverID: String) throws
-    func removeAll() throws
+    func token(for serverID: String) async throws -> String?
+    func setToken(_ token: String?, for serverID: String) async throws
+    func removeAll() async throws
 }
 
 /// Keychain 实现。
@@ -280,13 +292,59 @@ public protocol TokenStore: Sendable {
 public struct KeychainTokenStore: TokenStore {
     private let service: String
 
+    /// 跑 `SecItem*` 的专用串行队列。
+    ///
+    /// # 为什么是"专用队列"而不是 `Task.detached` 或协作线程池
+    ///
+    /// 这些调用是**阻塞**的（同步 XPC），而 Swift 并发的协作线程池是给
+    /// "不阻塞的活"准备的：池里只有与核数相当的线程，被同步 XPC 占住之后
+    /// 别的任务（包括主 actor 的续体）排不上队，症状是"整个应用一顿"。
+    /// libdispatch 的队列则会为阻塞的工作补线程，这正是它擅长的事。
+    ///
+    /// 串行而不是并发：同一时刻只应有一次 Keychain 操作 —— 读、写、删
+    /// 之间有先后关系（`setToken` 就是"先删再加"）。
+    private let queue = DispatchQueue(label: "app.isc.mizar.keychain")
+
     public init(service: String = "app.isc.mizar") {
         self.service = service
     }
 
-    public func token(for serverID: String) throws -> String? {
+    public func token(for serverID: String) async throws -> String? {
+        try await perform { try Self.read(service: service, serverID: serverID) }
+    }
+
+    public func setToken(_ token: String?, for serverID: String) async throws {
+        try await perform { try Self.write(token, service: service, serverID: serverID) }
+    }
+
+    public func removeAll() async throws {
+        try await perform { try Self.removeEverything(service: service) }
+    }
+
+    /// 把一段同步的 Keychain 操作交给专用队列，只 await 结果。
+    ///
+    /// 调用方（哪怕它是主 actor）在等待期间是**挂在续体上**的，而不是
+    /// 阻塞在自己的线程上 —— 这就是这个包装的全部意义。
+    private func perform<T: Sendable>(_ work: @escaping @Sendable () throws -> T) async throws -> T {
+        try await withCheckedThrowingContinuation { continuation in
+            queue.async {
+                continuation.resume(with: Result { try work() })
+            }
+        }
+    }
+
+    // MARK: - 真正的 Keychain 操作（只在上面那条队列上跑）
+
+    /// 读令牌。
+    ///
+    /// # 为什么这些是 `static` 而不是实例方法
+    ///
+    /// 它们要进上面那个 `@Sendable` 闭包，而闭包**只能**捕获 Sendable 的
+    /// 值。做成 `static` 之后进去的是 `service` 与 `serverID` 两个字符串，
+    /// 而不是整个 store —— 也顺带说明了这些函数不依赖任何实例状态。
+    private static func read(service: String, serverID: String) throws -> String? {
         #if canImport(Security)
-        var query = baseQuery(serverID)
+        var query = baseQuery(service: service, serverID: serverID)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
 
@@ -302,14 +360,14 @@ public struct KeychainTokenStore: TokenStore {
         #endif
     }
 
-    public func setToken(_ token: String?, for serverID: String) throws {
+    private static func write(_ token: String?, service: String, serverID: String) throws {
         #if canImport(Security)
         // 先删再加，而不是 SecItemUpdate：后者在条目不存在时会失败，
         // 于是"第一次配对"与"重新配对"会走两条不同的代码路径。
-        try? remove(serverID)
+        try? delete(service: service, serverID: serverID)
         guard let token else { return }
 
-        var query = baseQuery(serverID)
+        var query = baseQuery(service: service, serverID: serverID)
         query[kSecValueData as String] = Data(token.utf8)
         query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
 
@@ -318,7 +376,7 @@ public struct KeychainTokenStore: TokenStore {
         #endif
     }
 
-    public func removeAll() throws {
+    private static func removeEverything(service: String) throws {
         #if canImport(Security)
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -332,7 +390,7 @@ public struct KeychainTokenStore: TokenStore {
     }
 
     #if canImport(Security)
-    private func baseQuery(_ serverID: String) -> [String: Any] {
+    private static func baseQuery(service: String, serverID: String) -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -340,8 +398,8 @@ public struct KeychainTokenStore: TokenStore {
         ]
     }
 
-    private func remove(_ serverID: String) throws {
-        let status = SecItemDelete(baseQuery(serverID) as CFDictionary)
+    private static func delete(service: String, serverID: String) throws {
+        let status = SecItemDelete(baseQuery(service: service, serverID: serverID) as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw KeychainError.status(status)
         }
@@ -362,27 +420,31 @@ public enum KeychainError: Error, LocalizedError, Sendable {
 
 /// 内存实现。测试用，也在 Keychain 不可用时作为降级。
 ///
-/// 它是 `@unchecked Sendable` 而不是 actor：调用它的地方全都在
-/// 一个会话的串行路径上，而引入一次 await 会让"读令牌"这件事
-/// 在每一个请求前多一次调度。
-public final class InMemoryTokenStore: TokenStore, @unchecked Sendable {
-    private let lock = NSLock()
+/// # 为什么是 actor
+///
+/// 之前它是"一把 `NSLock` + `@unchecked Sendable`"，理由写的是"调用它的
+/// 地方全都在一个会话的串行路径上"。那个前提在 `ServerPool` 变成 actor、
+/// 四条轮询循环并发跑之后就**不再成立**了，而 `@unchecked` 不会因为前提
+/// 消失就报错 —— 它只会安静地继续放行。
+///
+/// 协议本身已经是 `async`，因此这里不需要再为"多一次 await"付任何代价，
+/// 而 actor 把互斥交给运行时，少一处"必须记得加锁"的地方。
+/// 它不做任何阻塞调用，所以它待在协作线程池上是合适的（与
+/// `KeychainTokenStore` 的专用队列相反）。
+public actor InMemoryTokenStore: TokenStore {
     private var tokens: [String: String] = [:]
 
     public init() {}
 
     public func token(for serverID: String) throws -> String? {
-        lock.lock(); defer { lock.unlock() }
-        return tokens[serverID]
+        tokens[serverID]
     }
 
     public func setToken(_ token: String?, for serverID: String) throws {
-        lock.lock(); defer { lock.unlock() }
         if let token { tokens[serverID] = token } else { tokens.removeValue(forKey: serverID) }
     }
 
     public func removeAll() throws {
-        lock.lock(); defer { lock.unlock() }
         tokens.removeAll()
     }
 }

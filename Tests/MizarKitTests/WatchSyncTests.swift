@@ -151,7 +151,7 @@ private func makeRecord(name: String = "Mac-mini") -> ServerRecord {
                                            osVersion: "27.0")
 
     // 派生需要一条已经建立的连接（内核在派生时会核对父设备是谁）。
-    _ = await try await pool.session(for: "srv-1").connect()
+    _ = try await pool.session(for: "srv-1").connect()
 
     let first = try await pool.watchAccess(for: "srv-1", device: device)
     #expect(first.token == "watch-token")
@@ -170,8 +170,8 @@ private func makeRecord(name: String = "Mac-mini") -> ServerRecord {
 
     // 手表的令牌与手机的分开存：放在同一个键下会让"吊销手表"
     // 变成"把手机也一起清掉"。
-    let phoneToken = try tokens.token(for: "srv-1")
-    let watchToken = try tokens.token(for: ServerPool.watchTokenKey("srv-1"))
+    let phoneToken = try await tokens.token(for: "srv-1")
+    let watchToken = try await tokens.token(for: ServerPool.watchTokenKey("srv-1"))
     #expect(phoneToken == "phone-token")
     #expect(watchToken == "watch-token")
 }
@@ -198,7 +198,7 @@ private func makeRecord(name: String = "Mac-mini") -> ServerRecord {
     #expect(stored.count == 1)
     #expect(stored[0].role == "viewer")
     #expect(stored[0].name == "Mac-mini")
-    #expect(try tokens.token(for: "srv-1") == "watch-token")
+    #expect(try await tokens.token(for: "srv-1") == "watch-token")
 
     // 手表没有摄像头，因此它**从不自己配对** —— 缺令牌时的表现必须是
     // "需要重新配对"，而不是静默地从列表里消失。

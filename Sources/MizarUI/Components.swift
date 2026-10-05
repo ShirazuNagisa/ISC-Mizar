@@ -283,6 +283,77 @@ public struct Card<Content: View>: View {
 }
 
 
+/// 连接中/还未拿到数据时的占位骨架。
+///
+/// # 为什么是骨架，而不是转圈，也不是空状态
+///
+/// "转圈"只说明进程在忙，它不告诉用户这一页**将要有**什么；而空状态
+/// （"还没有站点"）在数据还没到的那几秒里是一句**假话** —— 用户会以为
+/// 配置丢了，然后去做一些没必要的事（重新配对、重启内核）。
+///
+/// 骨架把页面的形状先摆出来，数据到了就地替换：感知是"内容立刻出现，
+/// 正在填"，而不是"点了没反应"或"东西没了"。
+///
+/// # 为什么画的是几何形状，而不是给真实内容套 `.redacted`
+///
+/// `.redacted(reason: .placeholder)` 的前提是"内容已经在手上、只是还不能
+/// 显示"（余额、还没揭晓的分数）—— 而这里手上**什么都没有**，没有东西
+/// 可以遮蔽。骨架要的是"这一页将要有几行、每行大概多高"，那必须自己画。
+public struct SkeletonRows: View {
+    /// 画几行。默认三行：它足够表达"这里是一列东西"，
+    /// 再多只会让骨架屏自己变成一个需要等的画面。
+    public let rows: Int
+    /// 行高。默认取正文字号。
+    public let height: CGFloat
+
+    public init(rows: Int = 3, height: CGFloat = 14) {
+        self.rows = rows
+        self.height = height
+    }
+
+    public var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            ForEach(0..<rows, id: \.self) { index in
+                // 首行短一点：一列"短标题 + 长内容"比几行等长的灰条
+                // 更像真实内容正在加载，而不是一块遮罩。
+                RoundedRectangle(cornerRadius: 4)
+                    .frame(width: index == 0 ? 64 : nil)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .frame(height: height)
+            }
+        }
+        .foregroundStyle(.quaternary)
+        .accessibilityLabel(tr("正在读取…", "Loading…"))
+    }
+}
+
+/// 整页的卡片骨架。
+///
+/// 用在"详情页已经在屏幕上、但数据还没到"的那一小段时间 ——
+/// 页签内部的骨架管不到它。它自己**不带** `ScrollView`：调用方要么
+/// 已经在滚动容器里（页签），要么自己包一层。
+public struct SkeletonCards: View {
+    public let cards: Int
+
+    public init(cards: Int = 3) {
+        self.cards = cards
+    }
+
+    public var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            ForEach(0..<cards, id: \.self) { index in
+                Card {
+                    SkeletonRows(rows: index == 1 ? 2 : 3)
+                }
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityLabel(tr("正在读取…", "Loading…"))
+    }
+}
+
+
 extension View {
     /// 让文本可被选中复制。
     ///

@@ -12,32 +12,40 @@ struct OverviewView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                if !model.advisories.isEmpty {
-                    Card(tr("需要处理", "Needs attention")) {
-                        ForEach(model.advisories) { advisory in
-                            AdvisoryRow(advisory: advisory)
+            if model.hasLoadedData {
+                VStack(alignment: .leading, spacing: 14) {
+                    if !model.advisories.isEmpty {
+                        Card(tr("需要处理", "Needs attention")) {
+                            ForEach(model.advisories) { advisory in
+                                AdvisoryRow(advisory: advisory)
+                            }
                         }
                     }
-                }
 
-                metricsRow
+                    metricsRow
 
-                if let metrics = model.metrics, let history = metrics.history, history.count > 1 {
-                    Card(tr("最近的 CPU", "Recent CPU")) {
-                        Sparkline(values: history.map(\.cpuPercent))
-                            .frame(height: 44)
-                        Text(tr("最近 \(history.count) 个采样点（每 5 秒一个）",
-                                "Last \(history.count) samples (one every 5 s)"))
-                            .font(.caption2).foregroundStyle(.tertiary)
+                    if let metrics = model.metrics, let history = metrics.history, history.count > 1 {
+                        Card(tr("最近的 CPU", "Recent CPU")) {
+                            Sparkline(values: history.map(\.cpuPercent))
+                                .frame(height: 44)
+                            Text(tr("最近 \(history.count) 个采样点（每 5 秒一个）",
+                                    "Last \(history.count) samples (one every 5 s)"))
+                                .font(.caption2).foregroundStyle(.tertiary)
+                        }
                     }
-                }
 
-                if !model.apps.isEmpty { sitesCard }
-                if !model.certificates.isEmpty { certificatesCard }
-                if let ip = model.ipStatus { addressCard(ip) }
+                    if !model.apps.isEmpty { sitesCard }
+                    if !model.certificates.isEmpty { certificatesCard }
+                    if let ip = model.ipStatus { addressCard(ip) }
+                }
+                .padding(16)
+            } else {
+                // 还没拉到任何数据：画骨架。
+                //
+                // 保留那四个写着"—"的指标卡也不算错，但"——"读起来像
+                // "这台机器真的没有这个数值"；而骨架明确表示"马上就来"。
+                SkeletonCards(cards: 2)
             }
-            .padding(16)
         }
         .refreshable { await model.refreshAll(); await model.refreshMetrics() }
     }

@@ -71,7 +71,8 @@ PY
 #
 # 不走 `simctl openurl`：那会弹出系统的"在 ISC Mizar 中打开？"确认框，
 # 而 simctl 没有点击能力 —— 脚本会卡在一个谁也点不掉的弹窗上。
-SIMCTL_CHILD_MIZAR_PAIR_LINK="$LINK" xcrun simctl launch "$DEVICE" app.isc.mizar >/dev/null 2>&1 \
+SIMCTL_CHILD_MIZAR_HEADLESS=1 SIMCTL_CHILD_MIZAR_PAIR_LINK="$LINK" \
+  xcrun simctl launch "$DEVICE" app.isc.mizar >/dev/null 2>&1 \
   && ok "已启动应用并注入配对链接" || bad "启动失败"
 sleep 12
 xcrun simctl io "$DEVICE" screenshot "$DIR/paired.png" >/dev/null 2>&1
@@ -125,10 +126,18 @@ fi
 # 它是 `MizarVersion.current` 唯一能被**外部**观察到的地方 —— 常量写错、
 # 忘了随设备信息上报、或者内核没存，三种情况在这里都会显形，而在客户端
 # 内部怎么断言都看不出来。
-if printf '%s' "$DEVICES" | grep -q '"app_version": *"0\.1\.0"'; then
-  ok "服务端看到的是 Mizar v0.2.0"
+# 版本号从 `Version.swift` **读**出来，而不是写死。
+#
+# 写死的版本号会在每次发版时变成一条永远失败的检查 —— 而它失败的样子
+# 与"版本号根本没上报"一模一样，于是下一个人会去查上报链路，
+# 而真正要改的是这个字符串。v0.2.0 发版时就是这样漏掉的。
+EXPECTED="$(grep -o 'current = "[^"]*"' Sources/MizarKit/Version.swift | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')"
+if [ -z "$EXPECTED" ]; then
+  bad "读不出 MizarVersion.current —— 脚本与源码已经脱节"
+elif printf '%s' "$DEVICES" | grep -q "\"app_version\": *\"$EXPECTED\""; then
+  ok "服务端看到的是 Mizar v$EXPECTED"
 else
-  bad "服务端没有收到应用版本号"
+  bad "服务端没有收到应用版本号（期望 v$EXPECTED）"
 fi
 
 printf '\n========================================\n'

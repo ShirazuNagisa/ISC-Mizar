@@ -286,31 +286,41 @@ private func makeRecord(addresses: [String] = ["192.168.1.10:8788", "10.0.0.5:87
     #expect(await session.address == "192.168.1.10:8788")
 }
 
-/// 401 之后必须**立刻**停止，不再试别的地址。
+/// 401 之后必须**立刻**放弃整场竞速，不等其余地址。
 ///
 /// 它意味着我们够到了内核，只是它不认这个令牌 —— 换地址不会有不同结果，
-/// 而继续试只会让用户多等好几秒（每个地址都要走一次超时）。
+/// 而对面的下一步动作是"重新配对"，不是"检查网络"。
+///
+/// # 这条测试在"并行竞速"之下测的是同一件事，但断言换了
+///
+/// 地址现在是**同时**发起的，因此"别的地址没有被试过"不再成立（它们
+/// 已经在路上了）。能保留、也更该断言的是：**不等它们**。这里把另一条
+/// 地址做成"永远不回答"，而 401 那条要等对手开跑之后再回答 —— 于是
+/// "整场竞速在 401 到达时就收摊"这件事是确定的，而不是看调度运气。
 @Test func sessionStopsAtTheFirstUnauthorized() async {
-    let first = StubTransport()
-    await first.enqueue("GET", "/v1/remote/self", .failure("unauthorized", 401, "这台设备已被吊销，请重新配对。"))
-    let second = StubTransport()
-    await second.enqueue("GET", "/v1/remote/self", .ok(selfResponse))
+    let hanging = HangingTransport()
+    let unauthorized = UnauthorizedAfterRivalStarts(rival: hanging)
 
-    let session = ServerSession(record: makeRecord(), token: "tok", makeTransport: factory([
-        "https://192.168.1.10:8788": first,
-        "https://10.0.0.5:8788": second,
-    ]))
+    let session = ServerSession(record: makeRecord(), token: "tok", makeTransport: { spec in
+        let transport: any KernelTransport = spec.baseURL.absoluteString == "https://10.0.0.5:8788"
+            ? unauthorized : hanging
+        return transport
+    })
+
+    let clock = ContinuousClock()
+    let started = clock.now
     let state = await session.connect()
+    let elapsed = clock.now - started
 
     guard case .needsPairing(let detail) = state else {
         Issue.record("期望 .needsPairing，得到 \(state)")
         return
     }
     #expect(detail.contains("吊销"))
-    let firstCalls = await first.calls
-    let secondCalls = await second.calls
-    #expect(firstCalls.count == 1)
-    #expect(secondCalls.isEmpty, "401 之后不该再试其它地址")
+    #expect(await hanging.started == 1, "两条地址都应当被试到（它们是并行的）")
+    #expect(await hanging.cancelled == 1, "401 之后那条在途的探测必须被取消，而不是等它超时")
+    // 对手要挂 60 秒。串行实现会等到它超时，竞速实现应当立刻返回。
+    #expect(elapsed < .seconds(5), "401 到达之后不该继续等别的地址，实际用了 \(elapsed)")
 }
 
 @Test func sessionReportsIdentityChangeSeparatelyFromUnreachable() async {
@@ -340,6 +350,72 @@ private func makeRecord(addresses: [String] = ["192.168.1.10:8788", "10.0.0.5:87
     }
     #expect(detail.contains("Phecda"))
     #expect(detail.contains("远程访问"))
+}
+
+/// 候选地址是**同时**试的，总耗时约等于最快那条。
+///
+/// # 这条测试钉住的是用户报告里的那半分钟
+///
+/// 一台服务端有六到八条候选地址（IPv4、几条全局 IPv6、ULA、`.local`、
+/// 公网域名）。逐个试的耗时是"候选数 × 单次超时"：离家在外时前七条
+/// 全部等满 4 秒，而唯一能通的那条公网域名排在**最后**。
+///
+/// 这里把可用的那条放在最后，前面四条都挂住 60 秒 —— 于是"并行"与
+/// "串行"的差别不是几毫秒的抖动，而是 2 秒与 4 分钟的差别。
+@Test func sessionRacesEveryCandidateAtOnce() async {
+    let hanging = (0..<4).map { _ in HangingTransport() }
+    let winner = GatedSuccessTransport(rivals: hanging, body: selfResponse)
+
+    var addresses: [String] = []
+    var routes: [String: any KernelTransport] = [:]
+    for (index, transport) in hanging.enumerated() {
+        let address = "10.0.0.\(index + 1):8788"
+        addresses.append(address)
+        routes["https://\(address)"] = transport
+    }
+    // 能通的那条排在最后 —— 与"公网域名排在局域网候选之后"一致。
+    addresses.append("public.example.com:8788")
+    routes["https://public.example.com:8788"] = winner
+    let byAddress = routes
+
+    let session = ServerSession(record: makeRecord(addresses: addresses), token: "tok",
+                                makeTransport: { byAddress[$0.baseURL.absoluteString] ?? StubTransport() })
+
+    let clock = ContinuousClock()
+    let started = clock.now
+    let state = await session.connect()
+    let elapsed = clock.now - started
+
+    #expect(state == .online)
+    #expect(await session.address == "public.example.com:8788")
+    #expect(elapsed < .seconds(3), "竞速应当约等于最快那条的耗时，实际 \(elapsed)")
+    for transport in hanging {
+        #expect(await transport.started == 1, "每一条候选都应当被同时发起")
+        #expect(await transport.cancelled == 1, "赢家出现之后，在途的探测必须被取消")
+    }
+}
+
+/// 竞速之下，"够到了内核但身份不对"仍然比"连不上"更该被报出来。
+///
+/// 这两句话对应两个完全不同的动作：一个是"去 Phecda 上核对这台机器"，
+/// 一个是"检查网络与内核"。报错了后者，用户会把一个身份问题当成网络
+/// 问题查下去。
+@Test func sessionRacingPrefersIdentityChangeOverUnreachable() async {
+    let reachable = StubTransport()
+    await reachable.enqueue("GET", "/v1/remote/self",
+                            .failure("identity_changed", 0, "服务器身份已变化。"))
+
+    let session = ServerSession(
+        record: makeRecord(addresses: ["192.168.1.10:8788", "10.0.0.5:8788", "Mac-mini.local:8788"]),
+        token: "tok",
+        makeTransport: factory(["https://192.168.1.10:8788": reachable]))
+
+    let state = await session.connect()
+
+    guard case .identityChanged = state else {
+        Issue.record("期望 .identityChanged，得到 \(state)")
+        return
+    }
 }
 
 @Test func sessionPollsEventsWithAnAdvancingCursor() async throws {
@@ -410,6 +486,94 @@ private func makeRecord(addresses: [String] = ["192.168.1.10:8788", "10.0.0.5:87
     #expect(await session.address == "Mac-mini.local:8788")
 }
 
+// MARK: - 竞速用的传输
+
+/// 一条永远不回答、但**响应取消**的候选地址。
+///
+/// 60 秒这个数字是刻意的：它比 `ServerSession.probeTimeout`（4 秒）大一个
+/// 数量级，因此"等到超时"与"被取消"在耗时上是两回事，断言不会因为机器
+/// 慢而变得模糊。真实世界里对应的是"这条地址在这个网络上根本不通" ——
+/// 请求发出去，直到超时才失败。
+///
+/// 响应取消这一点必须与 URLSession 一致：赢家出现之后其余探测要能立刻
+/// 收摊（`withTaskGroup` 会等所有子任务结束，一个不响应取消的桩会把
+/// `connect` 一起拖住，测试也就测不出真实行为了）。
+actor HangingTransport: KernelTransport {
+    private(set) var started = 0
+    private(set) var cancelled = 0
+
+    func call(_ method: String, _ path: String, body: Data?) async throws -> KernelReply {
+        started += 1
+        do {
+            try await Task.sleep(for: .seconds(60))
+        } catch {
+            cancelled += 1
+            throw error
+        }
+        throw KernelError(code: "unreachable", message: "这条地址不该有回答")
+    }
+
+    func pollEvents(since: Int64, timeoutMilliseconds: Int) async throws -> EventBatch {
+        EventBatch(events: [], next: since, gap: false)
+    }
+}
+
+/// 一条能通、但要等所有对手都开跑之后再回答的地址。
+///
+/// 没有这个"等"的话，"并行发起"这件事会因为调度顺序而无法断言：赢家
+/// 可能在其余子任务被调度之前就返回了。真实网络里它对应的是"这条地址
+/// 最快" —— 我们要测的正是"最快的赢，而不是序号最前的赢"。
+actor GatedSuccessTransport: KernelTransport {
+    private let rivals: [HangingTransport]
+    private let payload: String
+
+    init(rivals: [HangingTransport], body: String) {
+        self.rivals = rivals
+        self.payload = body
+    }
+
+    func call(_ method: String, _ path: String, body: Data?) async throws -> KernelReply {
+        for _ in 0..<2_000 {
+            var waiting = 0
+            for rival in rivals {
+                if await rival.started == 0 { waiting += 1 }
+            }
+            if waiting == 0 { break }
+            try? await Task.sleep(for: .milliseconds(1))
+        }
+        return KernelReply(status: 200, body: try JSONValue.parse(payload))
+    }
+
+    func pollEvents(since: Int64, timeoutMilliseconds: Int) async throws -> EventBatch {
+        EventBatch(events: [], next: since, gap: false)
+    }
+}
+
+/// 一条"等对手开跑之后再回 401"的地址。
+///
+/// 等这一步是为了让断言确定：无论调度顺序如何，401 到达时另一条探测
+/// 一定已经在路上 —— 于是"401 之后不等它"才是真的被验证了。
+actor UnauthorizedAfterRivalStarts: KernelTransport {
+    private let rival: HangingTransport
+
+    init(rival: HangingTransport) {
+        self.rival = rival
+    }
+
+    func call(_ method: String, _ path: String, body: Data?) async throws -> KernelReply {
+        for _ in 0..<2_000 {
+            if await rival.started > 0 { break }
+            try? await Task.sleep(for: .milliseconds(1))
+        }
+        throw KernelError(code: "unauthorized", status: 401,
+                          message: "这台设备已被吊销，请重新配对。")
+    }
+
+    func pollEvents(since: Int64, timeoutMilliseconds: Int) async throws -> EventBatch {
+        EventBatch(events: [], next: since, gap: false)
+    }
+}
+
 // MARK: - 服务端池
 
 private func makePool(directory: URL, tokens: TokenStore,
@@ -431,6 +595,140 @@ private func tempDirectory() -> URL {
         .appendingPathComponent("mizar-pool-\(UUID().uuidString)")
 }
 
+/// 数一数"读了几次令牌"的存储。
+///
+/// 存在的理由：Keychain 的每一次读都是一次到 `securityd` 的同步 XPC。
+/// 这个桩把"读了几次"变成可断言的事实 —— 否则它只是一个在真机上才
+/// 能感觉到、而谁也不会去数的开销。
+actor CountingTokenStore: TokenStore {
+    private let inner = InMemoryTokenStore()
+    private(set) var reads = 0
+
+    func token(for serverID: String) async throws -> String? {
+        reads += 1
+        return try await inner.token(for: serverID)
+    }
+
+    func setToken(_ token: String?, for serverID: String) async throws {
+        try await inner.setToken(token, for: serverID)
+    }
+
+    func removeAll() async throws {
+        try await inner.removeAll()
+    }
+}
+
+/// 令牌**不是**每个请求都去 Keychain 取一次。
+///
+/// # 这条测试挡的是"会话重建 → 再读一次 Keychain"
+///
+/// 会话自己攥着令牌，但会话会失效重建（拿到公网地址、手表同步、列表页
+/// 每台服务端各建一次会话）。没有这一层缓存的话，重新连一次就是又一次
+/// 同步 XPC —— 而它发生在用户按"重试"的那一刻。
+@Test func poolReadsTheTokenOncePerRun() async throws {
+    let dir = tempDirectory()
+    defer { try? FileManager.default.removeItem(at: dir) }
+
+    let tokens = CountingTokenStore()
+    let stub = StubTransport()
+    await stub.enqueue("GET", "/v1/remote/self", .ok(selfResponse))
+    let pool = makePool(directory: dir, tokens: tokens,
+                        transports: ["https://192.168.1.10:8788": stub])
+
+    let record = makeRecord(addresses: ["192.168.1.10:8788"])
+    try await tokens.setToken("tok", for: record.id)
+    try await ServerStore(directory: dir).upsert(record)
+
+    _ = try await pool.session(for: record.id)   // 第一次：这里才该读 Keychain
+    _ = try await pool.session(for: record.id)   // 命中缓存
+    _ = try await pool.connect(id: record.id)    // 仍然命中缓存
+    // 换公网地址会让会话失效重建 —— 这是最典型的"重建"路径。
+    try await pool.setPublicHost("mizar-abc.example.com", port: 8788, for: record.id)
+    _ = try await pool.session(for: record.id)   // 重建：还是命中缓存
+
+    let reads = await tokens.reads
+    #expect(reads == 1, "一台服务端在一次运行里只该读一次 Keychain，实际 \(reads) 次")
+}
+
+/// 写公网地址**不能**把已经连上的会话丢掉。
+///
+/// # 这条测试挡的是"配对成功了，但主页永远什么都没有"
+///
+/// `AppModel.connectAndRefresh` 的顺序是：连接 → 把服务端自述里的公网
+/// 子域名写进记录 → 拉全部数据。中间那一步原来是 `sessions[id] = nil`
+/// （因为会话里存着改之前的那份候选地址），于是紧接着的全量刷新拿到的是
+/// **一个还没连上的新会话**：`session.kernel()` 抛错，七个数据字段一个都
+/// 不写 —— 界面上就是一个永远填不上的空页面（骨架屏版本里是永远转不完
+/// 的占位）。
+///
+/// 这个缺陷是在 iOS 模拟器上跑真链路时由**截图**暴露的：左上角写着
+/// "已连接 · 21:22"，右边却只有占位卡片。单元测试里每一层都是对的，
+/// 错的是它们被调用的顺序。
+@Test func recordingThePublicHostKeepsTheLiveSession() async throws {
+    let dir = tempDirectory()
+    defer { try? FileManager.default.removeItem(at: dir) }
+
+    let tokens = InMemoryTokenStore()
+    let stub = StubTransport()
+    await stub.enqueue("GET", "/v1/remote/self", .ok(selfResponse))
+    let pool = makePool(directory: dir, tokens: tokens,
+                        transports: ["https://192.168.1.10:8788": stub])
+
+    let record = makeRecord(addresses: ["192.168.1.10:8788"])
+    try await tokens.setToken("tok", for: record.id)
+    try await ServerStore(directory: dir).upsert(record)
+
+    #expect(try await pool.connect(id: record.id) == .online)
+
+    // 连接之后写公网地址 —— 与 `connectAndRefresh` 的顺序一致。
+    try await pool.setPublicHost("mizar-abc.example.com", port: 8788, for: record.id)
+
+    // 紧接着的那次全量刷新必须还能拿到同一个已连接的会话。
+    let session = try await pool.session(for: record.id)
+    #expect(await session.state == .online, "写公网地址不该把连接丢掉")
+    _ = try await session.kernel()   // 会话被丢掉的话这里会抛错
+    #expect(await session.snapshot().publicHost == "mizar-abc.example.com",
+            "候选地址仍然要更新 —— 否则公网那条要等下次启动才生效")
+}
+
+/// 令牌被服务端拒了之后必须**重新**去 Keychain 取，而不是继续用缓存那份。
+///
+/// # 为什么这很重要
+///
+/// 用户可能在别处（另一台手机、Phecda 的页面）重新配对过，而本地这份
+/// 令牌已经作废。401 之后若还用缓存里那份重连，用户会陷入"一直在重新
+/// 配对、一直在 401"的循环 —— 而他手上那份新令牌始终没有被用上。
+@Test func poolForgetsARejectedTokenAndUsesTheNewOne() async throws {
+    let dir = tempDirectory()
+    defer { try? FileManager.default.removeItem(at: dir) }
+
+    let tokens = InMemoryTokenStore()
+    let record = makeRecord(addresses: ["192.168.1.10:8788"])
+    try await tokens.setToken("stale", for: record.id)
+    try await ServerStore(directory: dir).upsert(record)
+
+    let ok = StubTransport()
+    await ok.enqueue("GET", "/v1/remote/self", .ok(selfResponse))
+    let rejected = StubTransport()
+    await rejected.enqueue("GET", "/v1/remote/self",
+                           .failure("unauthorized", 401, "这台设备已被吊销，请重新配对。"))
+
+    // 传输按**令牌**分流：只有新令牌才连得上。于是"用的是哪一份令牌"
+    // 由连接结果直接证明，不必去偷看内部状态。
+    let pool = ServerPool(directory: dir, tokens: tokens, makeTransport: { spec in
+        spec.token == "fresh" ? ok : rejected
+    })
+
+    let first = try await pool.connect(id: record.id)
+    #expect(first == .needsPairing("这台设备已被吊销，请重新配对。"))
+
+    // 在别处重新配对：Keychain 里换成了新的那一份。
+    try await tokens.setToken("fresh", for: record.id)
+
+    let second = try await pool.connect(id: record.id)
+    #expect(second == .online, "401 之后必须重新读 Keychain，否则永远撞同一个 401")
+}
+
 @Test func poolStoresTokenAndRecordTogether() async throws {
     let dir = tempDirectory()
     defer { try? FileManager.default.removeItem(at: dir) }
@@ -447,7 +745,7 @@ private func tempDirectory() -> URL {
     let session = try await pool.add(outcome)
 
     #expect(await pool.records().count == 1)
-    #expect(try tokens.token(for: outcome.record.id) == "tok-1")
+    #expect(try await tokens.token(for: outcome.record.id) == "tok-1")
     #expect(await session.snapshot().name == "Mac-mini")
 }
 
@@ -479,12 +777,12 @@ private func tempDirectory() -> URL {
     let tokens = InMemoryTokenStore()
     let pool = makePool(directory: dir, tokens: tokens)
     let record = makeRecord()
-    try tokens.setToken("tok", for: record.id)
+    try await tokens.setToken("tok", for: record.id)
     try await ServerStore(directory: dir).upsert(record)
 
     #expect(try await pool.remove(id: record.id))
     #expect(await pool.records().isEmpty)
-    #expect(try tokens.token(for: record.id) == nil, "令牌必须一起清掉")
+    #expect(try await tokens.token(for: record.id) == nil, "令牌必须一起清掉")
 }
 
 @Test func poolConnectsAndSyncsTheRoleBackIntoTheRecord() async throws {
@@ -495,7 +793,7 @@ private func tempDirectory() -> URL {
     // 记录里写的是 viewer，而服务端说是 operator —— 以服务端为准。
     var record = makeRecord(addresses: ["192.168.1.10:8788"])
     record.role = "viewer"
-    try tokens.setToken("tok", for: record.id)
+    try await tokens.setToken("tok", for: record.id)
     try await ServerStore(directory: dir).upsert(record)
 
     let stub = StubTransport()

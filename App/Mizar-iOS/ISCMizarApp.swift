@@ -19,13 +19,44 @@ struct ISCMizarApp: App {
     @State private var model = AppModel()
     @Environment(\.scenePhase) private var scenePhase
 
+    /// 首启权限引导走没走过。
+    ///
+    /// 用 `@AppStorage` 而不是自己写一个文件：这个标记的全部语义就是
+    /// "这台设备上已经有过第一次了"，而它不该跟着 iCloud 备份跑到另一台
+    /// 手机上 —— 那里的权限状态是另一回事。
+    @AppStorage(PermissionOnboarding.completedKey) private var onboardingCompleted = false
+
     var body: some Scene {
         WindowGroup {
             RootView(model: model)
+                // 引导页**盖在**根视图之上，而不是替换它。
+                //
+                // # 为什么不替换
+                //
+                // 替换会把 `RootView` 从视图树里摘掉，而下面那个 `.task`
+                // 挂在它身上 —— 于是"用配对链接启动应用"这条路径在引导
+                // 走完之前根本不会跑 `model.enterForeground()`。而
+                // `Scripts/acceptance-ios.sh` 正是用一条配对链接驱动整个
+                // 应用的：它会在引导页上停住，服务端那条"设备已入库"的
+                // 断言随之失败。
+                //
+                // 盖上去就没有这个问题：配对照常发生，引导页只是挡在前面。
+                .overlay {
+                    if showsOnboarding {
+                        PermissionOnboardingView(push: model.push) {
+                            onboardingCompleted = true
+                        }
+                        .transition(.opacity)
+                    }
+                }
+                .animation(.easeInOut(duration: 0.2), value: showsOnboarding)
                 .task {
                     PhoneWatchSession.shared.activate(model: model)
                     await model.enterForeground()
                     await ingestPairingLinkFromEnvironment()
+                    // 顺序在最后：它要读通知权限，而权限可能在引导页里
+                    // 刚刚被改过。
+                    await registerForRemoteNotificationsIfAuthorized()
                 }
                 // 配对链接。
                 //
@@ -51,8 +82,17 @@ struct ISCMizarApp: App {
                 }
                 // 系统给了令牌（或注册失败）。
                 .onReceive(NotificationCenter.default.publisher(for: .mizarDeviceToken)) { note in
-                    guard let token = note.userInfo?["token"] as? String else { return }
-                    Task { await model.push.registerDeviceToken(token, in: model) }
+                    let info = note.userInfo
+                    Task {
+                        if let token = info?["token"] as? String {
+                            await model.push.registerDeviceToken(token, in: model)
+                        } else if let error = info?["error"] as? String {
+                            // 注册失败以前是**静默丢掉**的，症状是
+                            // "设置里的推送就绪，但一条通知都收不到" ——
+                            // 而唯一能解释它的那句话刚好被扔了。
+                            model.push.recordRegistrationFailure(error)
+                        }
+                    }
                 }
         }
         .onChange(of: scenePhase) { _, phase in
@@ -67,6 +107,13 @@ struct ISCMizarApp: App {
                 break
             }
         }
+    }
+
+    /// 引导页该不该显示。
+    ///
+    /// 两个条件缺一不可：用户没走过引导，**且**这次不是脚本驱动的启动。
+    private var showsOnboarding: Bool {
+        PermissionOnboarding.shouldPresent(completed: onboardingCompleted) && !isScriptedLaunch
     }
 }
 
@@ -95,6 +142,51 @@ private extension ISCMizarApp {
         guard let link = ProcessInfo.processInfo.environment["MIZAR_PAIR_LINK"],
               !link.isEmpty else { return }
         await model.pairFromLink(link)
+    }
+
+    /// 这次启动是不是脚本驱动的。
+    ///
+    /// 判据就是上面那个只有启动方设得了的环境变量。它决定两件事：
+    /// 注入配对链接，以及**不显示首启引导**。
+    ///
+    /// # 引导为什么要为它让路
+    ///
+    /// 那条脚本要回答的问题是"ATS 会不会挡住自签证书"，判据是启动
+    /// 十二秒之后截图里有没有出现那台服务器。而一次全新安装必然带着
+    /// "还没走过引导"的标记 —— 引导页于是正好盖在唯一那张证据上，
+    /// 让脚本变成一条**看不出对错**的检查。
+    ///
+    /// 它**单独一个变量**，不搭 `MIZAR_PAIR_LINK` 的便车。
+    ///
+    /// 一开始是拿"配对链接非空"当判据的，但那是两个不同的意思叠在
+    /// 一个名字上：链接回答"要连哪台"，而这里回答"别画引导页"。
+    /// 叠在一起之后，任何想注入链接的调试场景都会**顺带**失去引导页，
+    /// 而看不出来是为什么。
+    var isScriptedLaunch: Bool {
+        ProcessInfo.processInfo.environment["MIZAR_HEADLESS"] == "1"
+    }
+
+    /// 已经有通知权限时，向系统要一次 APNs 令牌。
+    ///
+    /// # 为什么这件事不能只在"用户点允许"那一刻做
+    ///
+    /// `registerForRemoteNotifications()` 是系统把令牌交给我们的**唯一**
+    /// 入口，而令牌不会自己回来。下面这两种情况里它一次都没被调用过：
+    ///
+    ///	权限是在引导页里给的（那条路径只申请授权，不负责注册）
+    ///	应用重装、或者从备份恢复到新机之后 —— 权限还在，但令牌是新的
+    ///
+    /// 少这一步的症状是"通知权限明明开着，服务端却一条都推不出来"：
+    /// 内核那边根本没有这台设备的令牌，而设备列表里那台设备看起来
+    /// 一切正常。它是幂等的 —— 重复调用只是让系统再回一次同一个令牌。
+    ///
+    /// 只在启动时做，不在每次回到前台时做：令牌没变时系统**仍然**会回调
+    /// 一次 `didRegisterForRemoteNotificationsWithDeviceToken`，于是每次
+    /// 切回前台都会给内核发一次登记请求、写一次库。启动一次足够覆盖
+    /// 重装与换机这两件真正会让令牌变掉的事。
+    func registerForRemoteNotificationsIfAuthorized() async {
+        guard await model.push.authorizationStatus() == .authorized else { return }
+        UIApplication.shared.registerForRemoteNotifications()
     }
 }
 

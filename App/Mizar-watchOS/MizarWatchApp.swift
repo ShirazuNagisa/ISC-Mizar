@@ -106,7 +106,10 @@ struct WatchOverviewView: View {
         }
         .navigationTitle(server.name)
         .task {
-            await model.select(server.id)
+            // `select` 是同步的：它把状态标成"连接中"就返回，连接在后台
+            // 跑。等它的话，手表上打开这一页会先卡住（而手表的主线程
+            // 被占住几秒，系统会直接判定应用无响应）。
+            model.select(server.id)
         }
     }
 

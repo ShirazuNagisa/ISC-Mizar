@@ -24,14 +24,18 @@ guard arguments.count >= 3 else {
 ///
 /// 刻意不用 Keychain：验收工具会在无人值守的脚本里跑，而 Keychain 在
 /// 那种环境下可能弹窗或直接失败 —— 那会让"验证"变成"看运气"。
+///
+/// 方法是 `async` 的：协议的形状就是这样，而"同步实现去满足 async 要求"
+/// 是合法但会骗人的写法 —— 读起来像不阻塞，实际却是在调用方线程上读完
+/// 整个文件。这里老老实实写成 async，读者不必去猜。
 struct FileTokenStore: TokenStore {
     let url: URL
 
-    func token(for serverID: String) throws -> String? {
+    func token(for serverID: String) async throws -> String? {
         try? String(contentsOf: url, encoding: .utf8)
     }
 
-    func setToken(_ token: String?, for serverID: String) throws {
+    func setToken(_ token: String?, for serverID: String) async throws {
         if let token {
             try token.write(to: url, atomically: true, encoding: .utf8)
         } else {
@@ -39,7 +43,7 @@ struct FileTokenStore: TokenStore {
         }
     }
 
-    func removeAll() throws {
+    func removeAll() async throws {
         try? FileManager.default.removeItem(at: url)
     }
 }
@@ -56,7 +60,7 @@ func ok(_ message: String) {
 /// 把一次配对的结果落到状态目录，并汇报基本信息。
 func commit(_ outcome: PairingService.Outcome, into stateDirectory: URL) async throws {
     let store = FileTokenStore(url: stateDirectory.appendingPathComponent("token"))
-    try store.setToken(outcome.token, for: outcome.record.id)
+    try await store.setToken(outcome.token, for: outcome.record.id)
     let pool = ServerPool(directory: stateDirectory, tokens: store)
     let session = try await pool.add(outcome)
     print("角色：\(await session.snapshot().role)")

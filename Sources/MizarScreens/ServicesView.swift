@@ -10,11 +10,21 @@ struct ServicesView: View {
     var body: some View {
         List {
             if model.apps.isEmpty {
-                ContentUnavailableView(
-                    tr("还没有站点", "No sites yet"),
-                    systemImage: "square.stack.3d.up.slash",
-                    description: Text(tr("在 Phecda 上创建站点之后，这里会显示它们的状态。",
-                                         "Sites created in Phecda show up here.")))
+                if model.hasLoadedData {
+                    ContentUnavailableView(
+                        tr("还没有站点", "No sites yet"),
+                        systemImage: "square.stack.3d.up.slash",
+                        description: Text(tr("在 Phecda 上创建站点之后，这里会显示它们的状态。",
+                                             "Sites created in Phecda show up here.")))
+                } else {
+                    // 数据还在路上：画骨架。
+                    //
+                    // 直接显示上面那句"还没有站点"是有害的 —— 它把一个
+                    // 加载中的状态说成了结论，用户会跑去 Phecda 上找那个
+                    // 明明存在的站点。
+                    SkeletonRows(rows: 4)
+                        .padding(.vertical, 8)
+                }
             }
             ForEach(model.apps) { app in
                 NavigationLink {

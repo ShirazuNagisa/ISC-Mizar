@@ -31,6 +31,13 @@ public struct RootView: View {
         } detail: {
             if let server = model.selectedServer {
                 ServerDetailView(model: model, server: server)
+            } else if !model.hasLoadedServers {
+                // 服务端列表还在从磁盘里读：先画骨架。
+                //
+                // 少了这一条，冷启动的第一帧是"还没有服务端，去扫码添加"
+                // —— 而用户明明有三台，那句话会让人以为配置丢了（甚至去
+                // 重新配对，于是多出第二条记录）。
+                ScrollView { SkeletonCards() }
             } else {
                 EmptyHint(
                     symbol: "antenna.radiowaves.left.and.right",
@@ -85,8 +92,13 @@ struct ServerDetailView: View {
                     symbol: "wifi.exclamationmark",
                     title: tr("连不上这台服务器", "Cannot reach this server"),
                     message: detail,
-                    action: (tr("重试", "Try again"), { Task { await model.connectAndRefresh() } }))
+                    // `retry()` 不阻塞：它把状态标成"连接中"就返回，
+                    // 于是点下去的**当帧**就会画出四个页签的骨架 ——
+                    // 而不是让用户对着一个按下去没反应的按钮等一轮超时。
+                    action: (tr("重试", "Try again"), { model.retry() }))
             default:
+                // `.connecting` / `.idle` 也走这里：连接中看到的是各页签的
+                // 占位骨架，数据到了就地填入。空白或转圈都不是它该有的样子。
                 TabsView(model: model, server: server)
             }
         }

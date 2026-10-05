@@ -60,8 +60,9 @@ public actor ServerSession {
     /// 候选地址探测的单次超时。
     ///
     /// 4 秒的依据：局域网内的连接要么在几十毫秒内成功，要么就是不在
-    /// 这个网里。而一次连接可能要试七八个地址 —— 每个都等满 15 秒
-    /// 意味着离家在外时先卡一分多钟，而这期间界面什么都不显示。
+    /// 这个网里。而一次连接可能有七八个地址 —— 它们现在是**同时**发起、
+    /// 取最快的那一条（见 `connect`），因此这个值不再是"乘以地址数"
+    /// 而是整场竞速的上限：最坏情况下用户最多等 4 秒多一点。
     static let probeTimeout: TimeInterval = 4
 
     private let makeTransport: TransportFactory
@@ -86,42 +87,85 @@ public actor ServerSession {
     /// 服务端记录的当前快照。
     public func snapshot() -> ServerRecord { record }
 
+    /// 用最新的记录替换会话里那一份（候选地址变了之后：内核报出了
+    /// 公网子域名）。
+    ///
+    /// # 为什么是"换记录"而不是"重建会话"
+    ///
+    /// 重建会把**已经连上的那条链路**一起丢掉，而调用它的时刻恰好是
+    /// "刚连上、正要去拉数据" —— 界面于是停在一个没有客户端的空会话上，
+    /// 表现是"配对成功了，但主页永远什么都没有"。
+    ///
+    /// 这里要更新的其实只有"下次重连时先试哪几条地址"，当前的连接与
+    /// 候选列表无关。
+    public func updateRecord(_ newRecord: ServerRecord) {
+        record = newRecord
+    }
+
     /// 连接（或重连）。
     ///
     /// 返回最终状态，调用方不必再去读一次属性。
+    ///
+    /// # 候选地址是**并行竞速**，不是逐个试
+    ///
+    /// 一台服务端通常有六到八条候选地址（IPv4、好几条全局 IPv6、ULA、
+    /// `<hostname>.local`，再加一条公网域名）。逐个试的耗时是
+    /// "候选数 × 单次超时"：离家在外时前七条全部等满 4 秒（28 秒），
+    /// 而唯一能通的那条公网域名排在最后 —— 用户盯着一个"连接中"的
+    /// 界面等半分钟，然后才看到数据。全部同时发起之后，总耗时约等于
+    /// **最快那条**的耗时，也就是一次往返。
+    ///
+    /// 语义上有两处必须保留：
+    ///
+    ///   - **第一个成功者胜出**，其余立刻取消（不再花掉用户的时间）。
+    ///   - **401 立刻中止整场竞速**。它意味着我们够到了内核，只是它不认
+    ///     这个令牌 —— 换地址不会有不同的结果，继续等只是让用户多等
+    ///     几秒；而它对应的下一步动作是"重新配对"，不是"检查网络"。
     @discardableResult
     public func connect(language: String = "zh-CN") async -> SessionState {
         state = .connecting
 
+        let targets = probeTargets(language: language)
+        // 工厂在发任务**之前**读出来：子任务碰不到 actor 的属性，
+        // 而 `TransportFactory` 本身是 Sendable 的，可以安全地带进去。
+        let factory = makeTransport
+
         var failures: [KernelError] = []
-        for candidate in record.candidates() {
-            guard let baseURL = candidate.baseURL(scheme: record.scheme) else { continue }
-            // 探测用**短超时**：一次连接可能要试七八个地址，而每个都等满
-            // 15 秒意味着离家在外时先卡一分多钟。连上之后的日常请求
-            // 用正常超时（见 `client` 的重建）。
-            let probeClient = KernelClient(transport: makeTransportWithToken(
-                baseURL, trust: candidate.trust, language: language,
-                timeout: Self.probeTimeout))
-            do {
-                let selfInfo = try await probeClient.remoteSelf()
-                // 连上之后把传输换成正常超时的：探测那条预算
-                // 对指标、长轮询、启动站点这些真实请求都太短。
-                client = KernelClient(transport: makeTransportWithToken(
-                    baseURL, trust: candidate.trust, language: language))
-                info = selfInfo
-                role = selfInfo.role
-                address = Self.hostPort(baseURL)
-                state = .online
-                return state
-            } catch let error as KernelError {
-                failures.append(error)
-                // 401 意味着我们**够到了内核**，只是它不认这个令牌。
-                // 换一个地址不会有不同的结果，而继续试只会让用户多等
-                // 好几秒 —— 尤其是在蜂窝网络上，每个地址都要等超时。
-                if error.needsPairing { break }
-            } catch {
-                failures.append(KernelError(code: "unreachable", message: error.localizedDescription))
+        var winner: (target: ProbeTarget, info: RemoteSelfInfo, client: KernelClient)?
+
+        await withTaskGroup(of: ProbeOutcome.self) { group in
+            for target in targets {
+                group.addTask { await Self.probe(target, using: factory) }
             }
+
+            // 按完成的先后取结果，因此"最快的那个地址"决定结局。
+            while let outcome = await group.next() {
+                switch outcome {
+                case .ok(let target, let info, let client):
+                    winner = (target, info, client)
+                    // 取消其余探测：它们的超时预算是 4 秒一条，
+                    // 而我们已经不需要答案了。
+                    group.cancelAll()
+                    return
+                case .unauthorized(let error):
+                    failures.append(error)
+                    group.cancelAll()
+                    return
+                case .failed(let error):
+                    failures.append(error)
+                }
+            }
+        }
+
+        if let winner {
+            // 连上之后把传输换成正常超时的：探测那条预算（4 秒）
+            // 对指标、长轮询、启动站点这些真实请求都太短。
+            client = winner.client
+            info = winner.info
+            role = winner.info.role
+            address = Self.hostPort(winner.target.baseURL)
+            state = .online
+            return state
         }
 
         client = nil
@@ -191,15 +235,68 @@ public actor ServerSession {
 
     // MARK: - 内部
 
-    private func makeTransportWithToken(_ baseURL: URL, trust: TrustMode,
-                                        language: String,
-                                        timeout: TimeInterval = 15) -> any KernelTransport {
-        makeTransport(TransportSpec(baseURL: baseURL,
-                                    trust: trust,
-                                    pinnedSPKI: record.spkiSHA256,
-                                    token: token,
-                                    language: language,
-                                    timeout: timeout))
+    /// 一条候选地址的探测计划。
+    ///
+    /// 两条 `TransportSpec` 一起算好（探测用短超时、连上之后用正常超时），
+    /// 因为子任务里碰不到会话的状态：令牌、指纹、语言都必须在
+    /// **发任务之前**就固定下来。
+    private struct ProbeTarget: Sendable {
+        let baseURL: URL
+        let probeSpec: TransportSpec
+        let liveSpec: TransportSpec
+    }
+
+    /// 一次探测的结局。
+    private enum ProbeOutcome: Sendable {
+        case ok(ProbeTarget, RemoteSelfInfo, KernelClient)
+        /// 够到了内核但令牌不被接受 —— 与"连不上"是两件不同的事。
+        case unauthorized(KernelError)
+        case failed(KernelError)
+    }
+
+    /// 按"上次成功的优先，其余保持内核给的顺序"排出探测计划。
+    ///
+    /// 顺序在竞速里仍然有用：它决定子任务**发起的先后**，因此上次连通的
+    /// 那条会最先出发。但它不再是串行的依据 —— 后面的地址同时也在试。
+    private func probeTargets(language: String) -> [ProbeTarget] {
+        record.candidates().compactMap { candidate in
+            guard let baseURL = candidate.baseURL(scheme: record.scheme) else { return nil }
+            return ProbeTarget(
+                baseURL: baseURL,
+                probeSpec: TransportSpec(baseURL: baseURL,
+                                         trust: candidate.trust,
+                                         pinnedSPKI: record.spkiSHA256,
+                                         token: token,
+                                         language: language,
+                                         timeout: Self.probeTimeout),
+                liveSpec: TransportSpec(baseURL: baseURL,
+                                        trust: candidate.trust,
+                                        pinnedSPKI: record.spkiSHA256,
+                                        token: token,
+                                        language: language))
+        }
+    }
+
+    /// 探测一条候选地址。
+    ///
+    /// `nonisolated static`：它不读也不写会话的状态（全部输入都在
+    /// `ProbeTarget` 里），因此可以并发地跑 —— 这正是竞速成立的前提。
+    private nonisolated static func probe(_ target: ProbeTarget,
+                                          using factory: TransportFactory) async -> ProbeOutcome {
+        do {
+            let info = try await KernelClient(transport: factory(target.probeSpec)).remoteSelf()
+            // 探测通过之后换一条正常超时的传输：探测那 4 秒的预算
+            // 对指标、长轮询、启动站点这些真实请求都太短。
+            return .ok(target, info, KernelClient(transport: factory(target.liveSpec)))
+        } catch let error as KernelError {
+            // 401 单独成一类：调用方据此**立刻**中止整场竞速。
+            return error.needsPairing ? .unauthorized(error) : .failed(error)
+        } catch {
+            // 取消也会落到这里（URLSession 取消时抛的是 URLError）。
+            // 它只会进 `failures`，而 `classify` 不理会这类错误码，
+            // 因此不会污染最终状态。
+            return .failed(KernelError(code: "unreachable", message: error.localizedDescription))
+        }
     }
 
     static func hostPort(_ url: URL) -> String {

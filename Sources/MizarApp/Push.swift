@@ -128,10 +128,15 @@ public final class PushCoordinator {
 
         // 先按名字把服务器切过去 —— 用户有多台服务端，而通知只说了
         // 它来自哪一台。
+        //
+        // `select` 是**同步**的（连接交给后台任务）：这里若等它，下面
+        // 那句 `pendingRoute = route` 就会跟着等一次完整连接，而界面
+        // 要消费这个目标才能跳到通知指的那一项 —— 于是点开通知之后
+        // 会有好几秒毫无反应。切换本身就是定位目标所需要的全部。
         if let name = route.serverName,
            let match = model.servers.first(where: { $0.name == name }),
            match.id != model.selectedServerID {
-            await model.select(match.id)
+            model.select(match.id)
         }
         pendingRoute = route
     }
@@ -144,16 +149,14 @@ public final class PushCoordinator {
 
     /// APNs 环境。
     ///
-    /// Debug 构建装的是开发版描述文件，它的令牌只对沙箱有效 ——
-    /// 用错环境的症状是 `BadDeviceToken`，而那个错误看起来像
-    /// "令牌不对"，用户会去反复重装应用。
-    public nonisolated static var environment: String {
-        #if DEBUG
-        "sandbox"
-        #else
-        "production"
-        #endif
-    }
+    /// 用错环境的症状是 `BadDeviceToken` —— 它看起来像"令牌不对"，
+    /// 实际上是"你把开发版装到了真机上"。因此这个字符串值得算准。
+    ///
+    /// `static let` 而不是计算属性：算它要读一遍应用包里的描述文件，
+    /// 而这是一个会出现在界面上的值 —— 计算属性意味着**每画一帧**都同步
+    /// 读一次磁盘。`let` 的惰性初始化只做一次，且是线程安全的。
+    public nonisolated static let environment: String =
+        PushEnvironment.current(profile: PushEnvironment.embeddedProfile())
 
     /// 把 APNs 给的那串字节转成十六进制。
     ///
@@ -164,5 +167,103 @@ public final class PushCoordinator {
     /// 主 actor 上只会让后台线程（以及测试）多一次跳转。
     public nonisolated static func hexToken(from data: Data) -> String {
         data.map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// 记下一次**注册失败**。
+    ///
+    /// 由应用壳在 `didFailToRegisterForRemoteNotificationsWithError` 时
+    /// 调用。以前那句话是直接丢掉的，于是设置页显示"就绪"而用户一条通知
+    /// 都收不到 —— 唯一能解释它的文本恰好被扔了。
+    public func recordRegistrationFailure(_ message: String) {
+        lastRegistrationError = message
+    }
+}
+
+/// APNs 环境与它的判据。
+///
+/// # 为什么不是 `#if DEBUG`
+///
+/// `#if DEBUG` 回答的是"这份代码是怎么编译的"，而这个字符串要回答的是
+/// "**这份构建是怎么签名的**" —— 决定令牌属于哪个环境的是签名时嵌进去的
+/// `aps-environment` 权限，不是编译开关。两者在下面这些情况里会分叉：
+///
+///	用 Release 配置直接装到真机上调试（描述文件是 development，令牌属于沙箱）
+///	TestFlight / App Store（Release 编译，production 令牌）
+///
+/// 分叉的代价不小：走错环境的令牌会让 Apple 回 `BadDeviceToken`，而内核
+/// 把这个错误理解成"令牌失效了"，于是**把这台设备的令牌清掉**。用户看到
+/// 的是"通知一直收不到，而且每次都得重新登记一遍"。
+///
+/// 描述文件就躺在应用包里（`embedded.mobileprovision`），它的
+/// `Entitlements.aps-environment` 正是签名时用的那个值。读它比猜准。
+///
+/// 读不到时（模拟器上没有描述文件）才退回 `#if DEBUG`：模拟器上的推送
+/// 走的是沙箱，而它总是用 Debug 配置跑起来的。
+///
+/// 整个类型 `nonisolated`：它是一组纯函数，而所在 target 默认隔离在
+/// 主 actor 上。让它挂在主 actor 上的后果是 `PushCoordinator.environment`
+/// 那个 `nonisolated` 属性读不到它 —— 而"APNs 环境"本来就不该和界面
+/// 线程有任何关系。
+public nonisolated enum PushEnvironment {
+    public static let sandbox = "sandbox"
+    public static let production = "production"
+
+    /// 决定当前构建该上报哪个环境。
+    ///
+    /// `builtForDebugging` 只在读不到描述文件时用作兜底，显式传进来
+    /// （而不是在里面写 `#if`）以便这个函数能被测试覆盖到两种分支。
+    public static func current(profile: Data?, builtForDebugging: Bool = isDebugBuild) -> String {
+        if let profile, let value = environment(inProfile: profile) {
+            return value
+        }
+        return builtForDebugging ? sandbox : production
+    }
+
+    #if DEBUG
+    /// 这份代码是不是以 Debug 配置编译的。
+    public static let isDebugBuild = true
+    #else
+    public static let isDebugBuild = false
+    #endif
+
+    /// 从描述文件的内容里读出 `aps-environment`。
+    ///
+    /// # 为什么是扫字符串而不是解析 plist
+    ///
+    /// `embedded.mobileprovision` 是一个 CMS/PKCS#7 签名块，里面**嵌着**
+    /// 一份 XML plist —— `PropertyListSerialization` 直接吃不下它。而这里
+    /// 只需要一个键的值，为此引入一个 ASN.1 解析器（或者一个第三方库）
+    /// 不划算。
+    ///
+    /// 用 `.isoLatin1` 解码：它在 0…255 上是**双射**的，因此二进制段不会
+    /// 让解码失败（`.utf8` 会），而我们要找的那几个标签都是纯 ASCII。
+    public static func environment(inProfile data: Data) -> String? {
+        guard let text = String(data: data, encoding: .isoLatin1) else { return nil }
+        guard let keyRange = text.range(of: "<key>aps-environment</key>") else { return nil }
+        guard let open = text.range(of: "<string>", range: keyRange.upperBound..<text.endIndex),
+              let close = text.range(of: "</string>", range: open.upperBound..<text.endIndex) else {
+            return nil
+        }
+        let raw = text[open.upperBound..<close.lowerBound]
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        // 描述文件里写的是 `development` / `production`，而内核的契约
+        // （`RemotePushTokenRequest.environment`）用的是 `sandbox` /
+        // `production`。这一处转换是两边唯一的接缝，因此写死在这里。
+        switch raw {
+        case "development": return sandbox
+        case "production": return production
+        default: return nil
+        }
+    }
+
+    /// 应用包里那份描述文件的内容。
+    ///
+    /// 真机上有它；模拟器上没有（模拟器不做描述文件签名），因此返回 nil
+    /// 是**预期内**的，不是错误。
+    public static func embeddedProfile() -> Data? {
+        guard let path = Bundle.main.path(forResource: "embedded", ofType: "mobileprovision") else {
+            return nil
+        }
+        return try? Data(contentsOf: URL(fileURLWithPath: path))
     }
 }

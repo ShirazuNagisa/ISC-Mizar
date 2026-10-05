@@ -195,23 +195,58 @@ private func makeRecord(name: String, addresses: [String] = ["192.168.1.10:8788"
     #expect(await store.all().count == 1)
 }
 
-@Test func inMemoryTokenStoreBehavesLikeKeychain() throws {
+@Test func inMemoryTokenStoreBehavesLikeKeychain() async throws {
     let store = InMemoryTokenStore()
-    #expect(try store.token(for: "a") == nil)
+    #expect(try await store.token(for: "a") == nil)
 
-    try store.setToken("secret", for: "a")
-    #expect(try store.token(for: "a") == "secret")
+    try await store.setToken("secret", for: "a")
+    #expect(try await store.token(for: "a") == "secret")
 
     // 覆盖写：重新配对之后旧令牌必须被替换，而不是留下两条。
-    try store.setToken("newer", for: "a")
-    #expect(try store.token(for: "a") == "newer")
+    try await store.setToken("newer", for: "a")
+    #expect(try await store.token(for: "a") == "newer")
 
-    try store.setToken(nil, for: "a")
-    #expect(try store.token(for: "a") == nil)
+    try await store.setToken(nil, for: "a")
+    #expect(try await store.token(for: "a") == nil)
 
-    try store.setToken("x", for: "b")
-    try store.removeAll()
-    #expect(try store.token(for: "b") == nil)
+    try await store.setToken("x", for: "b")
+    try await store.removeAll()
+    #expect(try await store.token(for: "b") == nil)
+}
+
+/// `KeychainTokenStore` 真的能走完一轮"写 → 读 → 删"。
+///
+/// # 它测的是队列包装，不是 Keychain
+///
+/// `SecItem*` 现在跑在专用队列上，每个方法都要经一次
+/// `withCheckedThrowingContinuation`。这类包装只有两种错法：**漏掉恢复**
+/// 会让调用方永远挂着（测试超时），**恢复两次**会让进程直接崩掉 ——
+/// 两种都不会伪装成"测试通过"，因此这一条值得存在。
+///
+/// 环境没有钥匙串权限时（无签名的 CI 容器、锁住的登录钥匙串）它会抛
+/// `KeychainError`：那种情况下只要求"调用**返回**了"，而不断言往返结果。
+/// 这不是放水 —— 被断言的对象是包装，`securityd` 能不能用是环境的事。
+@Test func keychainStoreSurvivesTheOffThreadQueue() async throws {
+    let store = KeychainTokenStore(service: "app.isc.mizar.tests.\(UUID().uuidString)")
+    let id = "queue-probe"
+
+    do {
+        try await store.setToken("secret", for: id)
+        let stored = try await store.token(for: id)
+        #expect(stored == "secret", "写进去的必须能读回来")
+
+        try await store.setToken("newer", for: id)
+        let replaced = try await store.token(for: id)
+        #expect(replaced == "newer", "覆盖写不能留下两条")
+
+        try await store.setToken(nil, for: id)
+        let cleared = try await store.token(for: id)
+        #expect(cleared == nil)
+
+        try await store.removeAll()
+    } catch is KeychainError {
+        // 见上面：环境不给钥匙串时，能返回就说明包装是对的。
+    }
 }
 
 /// 令牌**不能**出现在服务端记录里。

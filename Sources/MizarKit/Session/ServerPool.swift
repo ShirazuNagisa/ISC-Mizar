@@ -17,6 +17,21 @@ public actor ServerPool {
     private let makeTransport: TransportFactory
     private var sessions: [String: ServerSession] = [:]
 
+    /// 已经取到的令牌。键与 `TokenStore` 的键一致（主令牌是服务端 id，
+    /// 手表令牌是 `id#watch`）。
+    ///
+    /// # 为什么要在会话之外再缓存一层
+    ///
+    /// 会话自己已经把令牌攥在手里（`ServerSession.token`），但它会失效
+    /// 重建 —— 拿到公网地址（`setPublicHost`）、手表同步、列表页上每台
+    /// 服务端各建一次会话 —— 而每一次重建都会再读一次 Keychain，也就是
+    /// 再来一次到 `securityd` 的同步 XPC。
+    ///
+    /// 缓存把这件事压成"每台服务端每次运行读一次"。失效只有两个来源：
+    /// 服务端拒绝了它（401，见 `forgetToken`），以及用户显式地增删或
+    /// 覆盖（`add` / `applySynced` / `remove` / `removeAllTokens`）。
+    private var tokenCache: [String: String] = [:]
+
     public init(directory: URL,
                 tokens: TokenStore = KeychainTokenStore(),
                 language: String = "zh-CN",
@@ -42,7 +57,7 @@ public actor ServerPool {
         guard let record = await store.record(id: id) else {
             throw KernelError(code: "not_found", message: "这台服务端已经不在列表里了。")
         }
-        guard let token = try tokens.token(for: id), !token.isEmpty else {
+        guard let token = try await cachedToken(for: id), !token.isEmpty else {
             // 记录还在但令牌没了 —— 只可能是 Keychain 被清过（换机恢复、
             // 用户在设置里清了它）。这时**不能**静默地删掉记录：用户看到
             // 的应该是"这台服务器需要重新配对"，而不是它凭空消失了。
@@ -53,6 +68,29 @@ public actor ServerPool {
         let session = ServerSession(record: record, token: token, makeTransport: makeTransport)
         sessions[id] = session
         return session
+    }
+
+    /// 读令牌：只有缓存里没有时才去问 `TokenStore`。
+    private func cachedToken(for key: String) async throws -> String? {
+        if let cached = tokenCache[key] { return cached }
+        guard let token = try await tokens.token(for: key), !token.isEmpty else { return nil }
+        tokenCache[key] = token
+        return token
+    }
+
+    /// 丢掉一台服务端缓存的令牌与会话。
+    ///
+    /// # 为什么 401 之后必须调用它
+    ///
+    /// "取一次就存在会话里"是有前提的：那个令牌还有效。服务端说它无效
+    /// （401）之后，继续拿缓存里那一份去重连只会得到同一个 401 —— 而
+    /// 用户此刻可能已经在别处重新配对过（Keychain 里是新的那份）。
+    /// 丢掉之后，下一次 `session(for:)` 会重新读 Keychain。
+    ///
+    /// 它只清内存，**不动记录**：令牌失效不等于这台服务端该从列表里消失。
+    public func forgetToken(id: String) {
+        tokenCache[id] = nil
+        sessions[id] = nil
     }
 
     /// 连接一台服务端。
@@ -68,6 +106,9 @@ public actor ServerPool {
                 try? await store.updateRole(id: id, role: info.role)
             }
         }
+        // 令牌被拒之后不能继续用它：下一次连接必须重新读 Keychain，
+        // 否则重连永远得到同一个 401（见 `forgetToken`）。
+        if case .needsPairing = state { forgetToken(id: id) }
         return state
     }
 
@@ -78,15 +119,17 @@ public actor ServerPool {
     /// 是"需要重新配对" —— 用户会去重新配对，然后得到两条一模一样的记录。
     @discardableResult
     public func add(_ outcome: PairingService.Outcome) async throws -> ServerSession {
-        try tokens.setToken(outcome.token, for: outcome.record.id)
+        try await tokens.setToken(outcome.token, for: outcome.record.id)
         do {
             try await store.upsert(outcome.record)
         } catch {
             // 记录写不进去就把令牌撤回：留着一个用不上的令牌只会让
             // 下次配对时的"覆盖写"多一次无谓的 Keychain 操作。
-            try? tokens.setToken(nil, for: outcome.record.id)
+            try? await tokens.setToken(nil, for: outcome.record.id)
             throw error
         }
+        // 刚写进去的那一份就是最新的：直接进缓存，省掉随后的第一次重读。
+        tokenCache[outcome.record.id] = outcome.token
 
         let session = ServerSession(record: outcome.record, token: outcome.token,
                                     makeTransport: makeTransport)
@@ -98,7 +141,8 @@ public actor ServerPool {
     @discardableResult
     public func remove(id: String) async throws -> Bool {
         sessions[id] = nil
-        try tokens.setToken(nil, for: id)
+        tokenCache[id] = nil
+        try await tokens.setToken(nil, for: id)
         return try await store.remove(id: id)
     }
 
@@ -137,6 +181,15 @@ public actor ServerPool {
     ///
     /// 地址变了就更新，没变就不写：这个方法每次连接后都会被调，
     /// 而每次都写盘是没必要的。
+    ///
+    /// # 会话是**更新**而不是丢弃
+    ///
+    /// 会话里存着改之前的那份记录，而候选地址由它决定 —— 所以要更新。
+    /// 但**不能**把它整个丢掉：调用它的顺序是"连接 → 写公网地址 → 拉全部
+    /// 数据"，丢掉之后紧接着的全量刷新拿到的是一个还没连上的新会话，
+    /// `session.kernel()` 抛错、七个数据字段一个都不写 —— 而界面就停在
+    /// 占位状态上，永远是空的。`ServerSession.updateRecord` 只换记录，
+    /// 不动已经建立的那条链路。
     public func setPublicHost(_ host: String?, port: Int?, for id: String) async throws {
         guard var record = await store.record(id: id) else { return }
         let normalized = (host?.isEmpty ?? true) ? nil : host
@@ -146,9 +199,9 @@ public actor ServerPool {
         record.publicHost = normalized
         record.publicPort = port
         try await store.upsert(record)
-        // 会话里存着**改之前**的那份记录，而它决定了候选地址列表 ——
-        // 不重建的话，刚拿到的公网地址要等下次重启才生效。
-        sessions[id] = nil
+        if let session = sessions[id] {
+            await session.updateRecord(record)
+        }
     }
 
     /// 手表令牌在钥匙串里的键。
@@ -169,7 +222,7 @@ public actor ServerPool {
         }
 
         let key = Self.watchTokenKey(id)
-        if !force, record.watchDeviceID != nil, let token = try tokens.token(for: key) {
+        if !force, record.watchDeviceID != nil, let token = try await cachedToken(for: key) {
             return SyncedServer(record: record.asViewer(), token: token)
         }
 
@@ -181,7 +234,8 @@ public actor ServerPool {
         let derived = try await kernel.deriveDevice(role: "viewer",
                                                     label: "Apple Watch",
                                                     device: device)
-        try tokens.setToken(derived.token, for: key)
+        try await tokens.setToken(derived.token, for: key)
+        tokenCache[key] = derived.token
 
         // **只记设备 id，不改父设备的角色** —— 手表是另一台设备，
         // 而这条记录描述的是手机自己。
@@ -198,14 +252,16 @@ public actor ServerPool {
     /// 而它在界面上显示"需要重新配对"。
     @discardableResult
     public func applySynced(_ synced: SyncedServer) async throws -> ServerSession {
-        try tokens.setToken(synced.token, for: synced.record.id)
+        try await tokens.setToken(synced.token, for: synced.record.id)
         try await store.upsert(synced.record)
+        tokenCache[synced.record.id] = synced.token
         sessions[synced.record.id] = nil
         return try await session(for: synced.record.id)
     }
 
     /// 丢掉全部令牌（"从本机移除全部数据"）。
-    public func removeAllTokens() throws {
-        try tokens.removeAll()
+    public func removeAllTokens() async throws {
+        tokenCache.removeAll()
+        try await tokens.removeAll()
     }
 }

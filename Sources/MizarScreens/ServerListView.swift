@@ -10,7 +10,19 @@ struct ServerListView: View {
     @State private var pendingForget: ServerRecord?
 
     var body: some View {
-        List(selection: $model.selectedServerID) {
+        // 选中走 `model.select` 而不是直接写 `model.selectedServerID`。
+        //
+        // # 为什么不能直接绑到属性上
+        //
+        // 直接写属性只改变了"选中项"这个事实，**没有任何东西会去连接
+        // 那一台** —— 于是点一下服务端，右边出现的是上一台的数据与
+        // 空白卡片，要等下一次进前台才可能填上。而 `select` 会立刻把
+        // 状态标成"连接中"（界面当帧画出骨架）并在后台发起连接。
+        //
+        // 用 `List(selection:)` 而不是自己写点击手势：iPad 横屏的侧栏
+        // 高亮、键盘上下键、VoiceOver 的"已选中"都靠它，自己实现会漏。
+        List(selection: Binding(get: { model.selectedServerID },
+                               set: { if let id = $0 { model.select(id) } })) {
             ForEach(model.servers) { server in
                 row(server)
                     .tag(server.id)

@@ -154,6 +154,8 @@ struct RecordFormView: View {
 struct SettingsView: View {
     @Bindable var model: AppModel
     @Environment(\.dismiss) private var dismiss
+    /// 用来在用户从系统设置返回时刷新权限状态。
+    @Environment(\.scenePhase) private var scenePhase
 
     @State private var showForgetAll = false
 
@@ -198,13 +200,43 @@ struct SettingsView: View {
                     // 两件事要分开说清楚：**这台手机**有没有被系统允许收通知，
                     // 与**这台服务端**有没有配好推送。只显示其中一半的话，
                     // "我明明开了"会变成一个查不下去的状态。
-                    if !pushAuthorized {
+                    switch pushState {
+                    case .notDetermined:
                         Button {
+                            // 只发这一条。应用壳收到之后会申请授权，并在
+                            // 拿到权限时向 APNs 注册。
+                            //
+                            // 以前这里**同时**又调了一次
+                            // `model.push.requestAuthorization()`：那次调用
+                            // 不会让结果更早回来，只会让"到底谁负责注册"
+                            // 有两个地方可看 —— 而漏掉注册的症状是
+                            // "权限给了但收不到通知"。
                             NotificationCenter.default.post(name: .mizarRequestPushRegistration, object: nil)
-                            Task { await model.push.requestAuthorization() }
                         } label: {
                             Label(tr("允许接收通知", "Allow notifications"), systemImage: "bell")
                         }
+
+                    case .denied:
+                        // 被拒之后画的是**另一条出路**，不是一个再点一次的
+                        // "允许"：系统只会问一次，`requestAuthorization` 在
+                        // 已经决定过之后不显示任何界面。以前这里画的就是
+                        // 那个"允许"按钮 —— 它按下去什么都不会发生，而
+                        // 用户会一直点它。
+                        #if os(iOS)
+                        Button {
+                            PermissionCenter(push: model.push).openSettings()
+                        } label: {
+                            Label(tr("去系统设置开启通知", "Turn on notifications in Settings"),
+                                  systemImage: "gear")
+                        }
+                        #endif
+                        Text(tr("系统只会问一次，现在再点「允许」也不会弹框。",
+                                "The system only asks once; tapping Allow again would not show a prompt."))
+                            .font(.caption2).foregroundStyle(.tertiary)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                    case .granted, .notRequestable:
+                        EmptyView()
                     }
 
                     if !apnsConfigured {
@@ -213,12 +245,31 @@ struct SettingsView: View {
                               systemImage: "bell.slash")
                             .font(.callout).foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
-                    } else if pushAuthorized {
+                    } else if pushState == .granted {
                         Label(tr("就绪。站点失败、证书失败、解析失败时会推送到这台设备。",
                                  "Ready. Failures of sites, certificates and DNS updates are pushed to this device."),
                               systemImage: "bell.badge")
                             .font(.callout).foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    // 上报给内核的 APNs 环境。
+                    //
+                    // 它平时不用露面，但**收不到通知**时它是第一个该被核对
+                    // 的东西：开发版装到真机上拿到的是沙箱令牌，而内核必须
+                    // 往沙箱发。两边对不上时 Apple 回的是 BadDeviceToken
+                    // —— 那个错误看起来像"令牌失效"，与真正的原因（环境
+                    // 不匹配）毫无相似之处。
+                    //
+                    // 只在服务端配了推送时显示：在那之前这一行是纯粹的噪音
+                    // （没有推送可发，也就无所谓发去哪个环境）。
+                    //
+                    // 做成一行可读的值而不是一个开关：它由签名时的
+                    // `aps-environment` 决定，用户改不了（见 PushEnvironment）。
+                    if apnsConfigured {
+                        LabeledContent(tr("推送环境", "Push environment"),
+                                       value: PushCoordinator.environment)
+                            .font(.caption)
                     }
 
                     if let error = model.push.lastRegistrationError {
@@ -312,7 +363,20 @@ struct SettingsView: View {
             }
             .navigationTitle(tr("设置", "Settings"))
             .task {
-                pushAuthorized = await model.push.authorizationStatus() == .authorized
+                pushState = PermissionOnboarding.state(
+                    forAuthorization: await model.push.authorizationStatus())
+            }
+            // 从系统设置回来时重新读一次。
+            //
+            // 少了这一条，用户在设置里把通知打开、切回来，看到的仍然是
+            // 那个"去系统设置开启通知"的按钮 —— 他会以为刚才那一下没生效，
+            // 于是再去一次。权限的真相在系统那里，而系统不会通知我们。
+            .onChange(of: scenePhase) { _, phase in
+                guard phase == .active else { return }
+                Task {
+                    pushState = PermissionOnboarding.state(
+                        forAuthorization: await model.push.authorizationStatus())
+                }
             }
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
@@ -337,7 +401,12 @@ struct SettingsView: View {
     ///
     /// 与"服务端配没配推送"是**两件事**，而用户看到的现象只有一个
     /// （"我没收到通知"）。只显示其中一半，排查就无从下手。
-    @State private var pushAuthorized = false
+    ///
+    /// 存的是三态而不是一个 `Bool`：被拒（`.denied`）与还没问过
+    /// （`.notDetermined`）在界面上必须是**两种**东西 —— 前者只能去
+    /// 系统设置，后者才值得画一个"允许"按钮。合成一个布尔的话，
+    /// 被拒的用户会看到一个按下去永远没反应的按钮。
+    @State private var pushState: PermissionStepState = .notDetermined
 
     /// 服务端是否配了 APNs 凭据。
     ///

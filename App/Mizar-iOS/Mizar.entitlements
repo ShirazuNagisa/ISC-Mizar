@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<!-- 推送。**没有这一条，`registerForRemoteNotifications()` 一定失败** ——
+     系统会回调 didFailToRegister...，错误是
+     "no valid 'aps-environment' entitlement string found for application"。
+     而它的症状是"权限给了、设置里显示就绪、却一条通知都收不到"：应用
+     从来就没拿到过 APNs 令牌，内核那边也就没有可以推的地方。
+
+     值的来源是构建配置里的 APS_ENVIRONMENT（见 project.pbxproj）：
+       Debug   → development（开发描述文件签的名，令牌只对沙箱有效）
+       Release → production （TestFlight / App Store）
+
+     用变量而不是写死 development：写死的话 Release 归档出来的包会带着
+     一个沙箱环境的声明，而它要么在签名时与描述文件冲突、要么更糟 ——
+     签过了，然后所有推送都因为没有对应环境的令牌而静默失败。
+
+     顺带一提：应用读回这个值（PushEnvironment）来决定上报给内核的环境，
+     因此这里填错会让内核把令牌发到错的接入点，而 Apple 那边只会回一个
+     BadDeviceToken。 -->
+<key>aps-environment</key>
+<string>$(APS_ENVIRONMENT)</string>
+</dict></plist>

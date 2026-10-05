@@ -39,6 +39,19 @@ trap cleanup EXIT
 json_field() { python3 -c 'import json,sys; print(json.load(sys.stdin).get(sys.argv[1],""))' "$1"; }
 
 head_ "启用远程访问并生成配对会话"
+
+# 端口必须真的空着。
+#
+# 上一轮没退干净的守护进程会占着它（`kill` 之后进程偶尔还活得比你想象的
+# 久），而那时的症状是"配对失败：服务器身份与配对码里固定的不一致" ——
+# 看起来像客户端的 bug，实际是本机还跑着上一轮的内核。多这一句，
+# 环境问题就不会被读成代码问题。
+if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+  echo "❌ 端口 $PORT 已被占用：多半是上一轮没有退出的内核" >&2
+  lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >&2
+  exit 2
+fi
+
 "$BIN" daemon run >"$DIR/daemon.log" 2>&1 &
 DPID=$!
 for _ in $(seq 1 60); do "$BIN" status >/dev/null 2>&1 && break; sleep 0.25; done
@@ -87,7 +100,24 @@ print([d["id"] for d in items if d["label"] == "mizar-acceptance"][0])
 ' > "$STATE/device" 2>/dev/null
 DEVICE="$(cat "$STATE/device" 2>/dev/null || true)"
 if [ -n "$DEVICE" ]; then
-  "$BIN" remote revoke "$DEVICE" --json >/dev/null
+  # 吊销**必须确认生效**，然后再去问客户端。
+  #
+  # 原来这里是 `revoke ... >/dev/null`：退出码被丢掉了，于是"吊销根本没
+  # 执行"与"客户端判错了"在输出上长得一模一样 —— 一次内核侧的偶发失败
+  # 会被读成客户端的 bug（这个坑真的踩到过：客户端报 online，而设备表里
+  # 那台设备的 revoked_at 是空的）。设备表里的 revoked_at 是唯一的证据，
+  # 因此这里直接把它读出来看一眼。
+  if ! "$BIN" remote revoke "$DEVICE" --json >/dev/null 2>&1; then
+    bad "吊销命令没有成功（这一步不成立时，下面的判断必然是 online）"
+  fi
+  MARKED="$("$BIN" remote devices --json 2>/dev/null | python3 -c '
+import json,sys
+items = json.load(sys.stdin)["items"]
+hit = [d for d in items if d["id"] == sys.argv[1]]
+print((hit[0].get("revoked_at") or "") if hit else "")
+' "$DEVICE" 2>/dev/null || true)"
+  [ -n "$MARKED" ] || bad "服务端没有把设备 $DEVICE 标记为已吊销"
+
   if swift run --quiet MizarAcceptance expect "$STATE" needsPairing 2>&1 | sed 's/^/  /'; then
     ok "吊销后客户端立刻改判为需要重新配对"
   else

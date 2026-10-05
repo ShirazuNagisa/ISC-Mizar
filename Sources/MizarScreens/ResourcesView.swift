@@ -15,22 +15,41 @@ struct ResourcesView: View {
 
     var body: some View {
         List {
-            if model.metrics?.host.metricsUnsupported == true {
+            if !model.hasLoadedData {
+                // 数据还没到：画骨架。
+                //
+                // 这一段不是装饰。下面每个 section 在数据为空时都会断言
+                // 一件**具体**的事（"没有报告磁盘"、"没有带独立进程的站点"），
+                // 而那些断言在数据还在路上的那几秒里全是假的 —— 用户会
+                // 以为内核坏了，而其实只是还没读回来。
                 Section {
-                    Text(tr("这台服务器所在的平台还没有实现资源采样。",
-                            "The platform this server runs on does not implement resource sampling yet."))
-                        .font(.callout).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                    SkeletonRows(rows: 5)
+                        .padding(.vertical, 8)
                 }
             } else {
-                hostSection
-            }
+                if model.metrics?.host.metricsUnsupported == true {
+                    Section {
+                        Text(tr("这台服务器所在的平台还没有实现资源采样。",
+                                "The platform this server runs on does not implement resource sampling yet."))
+                            .font(.callout).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                } else {
+                    hostSection
+                }
 
-            disksSection
-            gpuSection
-            appsSection
+                disksSection
+                gpuSection
+                appsSection
+            }
         }
-        .refreshable { await model.refreshMetrics() }
+        .refreshable {
+            // 还没有任何数据时走全量：只拉指标的话，上面那个骨架屏会
+            // 一直留在那儿 —— 用户下拉刷新之后看到"还在转"，而这正是
+            // 骨架屏最不该有的结局。
+            if !model.hasLoadedData { await model.refreshAll() }
+            await model.refreshMetrics()
+        }
     }
 
     @ViewBuilder private var hostSection: some View {
@@ -166,11 +185,20 @@ struct DNSView: View {
 
     var body: some View {
         List {
-            credentialsSection
-            if let zone = selectedZone {
-                recordsSection(zone)
+            if !model.hasLoadedData {
+                // 同上：凭据与 DDNS 两张卡在空数据时都会说"还没有…"，
+                // 而数据还在路上时那句话是错的。
+                Section {
+                    SkeletonRows(rows: 4)
+                        .padding(.vertical, 8)
+                }
+            } else {
+                credentialsSection
+                if let zone = selectedZone {
+                    recordsSection(zone)
+                }
+                ddnsSection
             }
-            ddnsSection
         }
         .refreshable { await model.refreshAll() }
         .sheet(isPresented: $creating) {
