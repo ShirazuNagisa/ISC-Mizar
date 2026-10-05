@@ -30,6 +30,36 @@ public enum SessionState: Sendable, Equatable {
     }
 }
 
+/// 一场候选地址竞速的进度快照。
+///
+/// # 为什么是"已完成几条"而不是"正在试第几条"
+///
+/// 候选地址是**同时**发起的（见 `ServerSession.connect`），因此
+/// "正在试第 3 条"是一句假话 —— 八条都在路上。真实且在变的是
+/// "已经有几条没有回应"，而用户真正需要从这句话里读到的也只是
+/// "它在动，不是死了"。
+public struct ConnectProgress: Sendable, Equatable {
+    /// 这一轮同时发起了几条候选地址。
+    public let total: Int
+    /// 其中已经**有结论（失败）**的条数。
+    public let finished: Int
+    /// 从发起那一刻到现在的秒数。
+    public let elapsed: TimeInterval
+
+    public init(total: Int, finished: Int, elapsed: TimeInterval) {
+        self.total = total
+        self.finished = finished
+        self.elapsed = elapsed
+    }
+}
+
+/// 进度回调。
+///
+/// 类型上钉住 `@MainActor`：它唯一的用途就是改界面状态，而如果放开成
+/// 任意隔离域，调用方就得自己开一个 `Task` 跳回主 actor —— 那样每次
+/// 回调的**顺序**不再有保证，界面上的数字会来回跳。
+public typealias ConnectProgressHandler = @MainActor @Sendable (ConnectProgress) -> Void
+
 /// 与一台服务端的一条会话。
 ///
 /// # 为什么是一个 actor
@@ -106,6 +136,12 @@ public actor ServerSession {
     ///
     /// 返回最终状态，调用方不必再去读一次属性。
     ///
+    /// - Parameter progress: 每有一条候选地址**有了结论**就回调一次。
+    ///   它存在的理由是把"正在连"与"卡住了"在界面上分开：一场竞速最坏
+    ///   要等满一次超时，而这段时间里界面如果只有一圈转动的菊花，
+    ///   用户看到的和死机没有区别。回调让界面能显示"8 条里有 3 条
+    ///   已经没回应了"，那是一个**在变**的数字。
+    ///
     /// # 候选地址是**并行竞速**，不是逐个试
     ///
     /// 一台服务端通常有六到八条候选地址（IPv4、好几条全局 IPv6、ULA、
@@ -122,16 +158,23 @@ public actor ServerSession {
     ///     这个令牌 —— 换地址不会有不同的结果，继续等只是让用户多等
     ///     几秒；而它对应的下一步动作是"重新配对"，不是"检查网络"。
     @discardableResult
-    public func connect(language: String = "zh-CN") async -> SessionState {
+    public func connect(language: String = "zh-CN",
+                        progress: ConnectProgressHandler? = nil) async -> SessionState {
         state = .connecting
 
         let targets = probeTargets(language: language)
         // 工厂在发任务**之前**读出来：子任务碰不到 actor 的属性，
         // 而 `TransportFactory` 本身是 Sendable 的，可以安全地带进去。
         let factory = makeTransport
+        let startedAt = Date()
 
         var failures: [KernelError] = []
         var winner: (target: ProbeTarget, info: RemoteSelfInfo, client: KernelClient)?
+
+        // 发起之前先报一次：界面据此**当帧**就能写出"正在同时试 8 条地址"，
+        // 而不是先转半秒没有任何文字的圈。
+        await progress?(ConnectProgress(total: targets.count, finished: 0,
+                                        elapsed: Date().timeIntervalSince(startedAt)))
 
         await withTaskGroup(of: ProbeOutcome.self) { group in
             for target in targets {
@@ -153,6 +196,13 @@ public actor ServerSession {
                     return
                 case .failed(let error):
                     failures.append(error)
+                    // 一条候选刚刚有了结论（失败）。**只有失败才报**：
+                    // 成功与 401 都会立刻结束整场竞速，那时界面要走的是
+                    // 另外两条路（显示数据 / 显示"需要重新配对"），
+                    // 再报一次进度只会让最后一帧文字闪一下。
+                    await progress?(ConnectProgress(total: targets.count,
+                                                    finished: failures.count,
+                                                    elapsed: Date().timeIntervalSince(startedAt)))
                 }
             }
         }

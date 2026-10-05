@@ -31,13 +31,12 @@ public struct RootView: View {
         } detail: {
             if let server = model.selectedServer {
                 ServerDetailView(model: model, server: server)
-            } else if !model.hasLoadedServers {
-                // 服务端列表还在从磁盘里读：先画骨架。
-                //
-                // 少了这一条，冷启动的第一帧是"还没有服务端，去扫码添加"
-                // —— 而用户明明有三台，那句话会让人以为配置丢了（甚至去
-                // 重新配对，于是多出第二条记录）。
-                ScrollView { SkeletonCards() }
+            } else if let cover = model.launchCover {
+                // 服务端列表还在从磁盘里读：它此刻是空数组，而"空"在这里
+                // 只有一个含义 —— "还没读到"。少了这一条，冷启动的第一帧
+                // 是"还没有服务端，去扫码添加"，而用户明明有三台（那句话
+                // 会让人以为配置丢了，甚至去重新配对，于是多出第二条记录）。
+                LoadingPanel(title: cover.title, detail: cover.detail, startedAt: cover.startedAt)
             } else {
                 EmptyHint(
                     symbol: "antenna.radiowaves.left.and.right",
@@ -57,6 +56,30 @@ public struct RootView: View {
                 BannerRow(text: notice, tint: .accentColor) { model.notice = nil }
             }
         }
+        // 冷启动的首屏加载态：盖住**整个**窗口，而不只是详情那一栏。
+        //
+        // # 为什么必须盖住整屏
+        //
+        // 冷启动时的第一帧画面是不确定的：`NavigationSplitView` 在窄屏上
+        // 显示哪一栏取决于此刻有没有选中项（有选中项时它会直接推到详情），
+        // 而"有没有选中项"又要等本机记录读出来才知道。只盖详情那一栏的话，
+        // 用户在最需要"它在动"的那几秒里可能正好在看另一栏 —— 一片空白，
+        // 而系统此刻正在判定这个应用有没有响应。
+        //
+        // iPad 上盖住侧栏同样成立：此刻侧栏里除了一个刚点过的高亮，
+        // 什么也没有。
+        //
+        // 切到另一台服务端时这一层**不出现**（见 `AppModel.launchCover`）：
+        // 那一刻用户的手正放在侧栏上，盖住它等于把唯一一条退路也堵上。
+        .overlay {
+            if let cover = model.launchCover {
+                LoadingPanel(title: cover.title, detail: cover.detail, startedAt: cover.startedAt)
+                    .transition(.opacity)
+            }
+        }
+        // 淡入淡出而不是直接切换：加载态消失的那一帧如果与内容出现的
+        // 那一帧硬接，观感是"闪了一下"。
+        .animation(.easeInOut(duration: 0.25), value: model.launchCover == nil)
     }
 }
 
@@ -93,13 +116,26 @@ struct ServerDetailView: View {
                     title: tr("连不上这台服务器", "Cannot reach this server"),
                     message: detail,
                     // `retry()` 不阻塞：它把状态标成"连接中"就返回，
-                    // 于是点下去的**当帧**就会画出四个页签的骨架 ——
+                    // 于是点下去的**当帧**就会画出加载态 ——
                     // 而不是让用户对着一个按下去没反应的按钮等一轮超时。
                     action: (tr("重试", "Try again"), { model.retry() }))
             default:
-                // `.connecting` / `.idle` 也走这里：连接中看到的是各页签的
-                // 占位骨架，数据到了就地填入。空白或转圈都不是它该有的样子。
-                TabsView(model: model, server: server)
+                // 连接中 / 连上了但数据还在路上：一块会动的加载态。
+                //
+                // 以前这里画的是各页签的**静态**骨架，那个选择是错的：
+                // 骨架长得像"已经渲染完了但内容是空的"，用户在等的这几秒
+                // 里读到的不是"正在加载"，而是"它卡住了"—— 而这段时间
+                // 恰好就是系统可能在判定这个应用有没有响应的那几秒。
+                //
+                // 真的没有加载在跑（`.idle`、手上也没有数据）时才退回
+                // 页签：那时页签里的骨架至少是诚实的 —— 它表示这一页
+                // 确实还没有内容。
+                if let loading = model.loading(for: server.id) {
+                    LoadingPanel(title: loading.title, detail: loading.detail,
+                                 startedAt: loading.startedAt)
+                } else {
+                    TabsView(model: model, server: server)
+                }
             }
         }
         .navigationTitle(server.name)

@@ -57,6 +57,37 @@ public final class AppModel {
     /// 最近一次成功刷新数据的时间（下拉刷新时显示）。
     public private(set) var lastRefresh: Date?
 
+    /// 当前这一次加载。
+    ///
+    /// # 为什么它是模型里的一份显式状态，而不是从 `states` 推出来的
+    ///
+    /// "该不该给用户看一个加载态"与"连接处于什么状态"不是同一个问题
+    /// （见 `LoadingStatus` 的说明）。从 `states` 现推的话，每一个
+    /// 调用点都要自己再判一次 `hasLoadedData`、再判一次是不是在途 ——
+    /// 而漏掉任何一处的后果是**转圈停不下来**（界面永远停在加载屏上，
+    /// 连重试按钮都出不来）。
+    ///
+    /// 因此这里的规则只有一条：**谁开始加载谁负责结束它**，
+    /// 并且结束点与 `states` 落到终态的地方是同一处。
+    public private(set) var loading: LoadingStatus?
+
+    /// 这一次运行里，首屏有没有**露过面**。
+    ///
+    /// 它只回答一个问题：现在要不要把整个窗口盖住（`launchCover`）。
+    /// 一旦有过一次"可以看了"，就不再盖 —— 那之后用户要的是侧栏
+    /// （去换一台服务端、去重试），而不是又一块盖住一切的东西。
+    private var hasRevealedInterface = false
+
+    /// 最近一次竞速报上来的进度。失败时用它拼出"试了几条地址、用了多久"。
+    private var lastAttempt: ConnectProgress?
+
+    /// 这一次启动是什么时候开始的。
+    ///
+    /// 它给"正在打开 Mizar…"那一屏当秒表的起点。必须是一个**存下来的**
+    /// 时间：每次求值都取 `Date()` 的话，那一行秒数会在每一帧重画时
+    /// 归零，于是它显示出来的东西恰好与它要证明的相反。
+    private let launchedAt = Date()
+
     /// 推送的注册与深链。
     ///
     /// 与模型放在一起而不是各视图各持一份：通知点开时驱动的正是这个模型，
@@ -139,7 +170,11 @@ public final class AppModel {
         // 顺序反过来是有代价的：主界面的数据会排在其他服务端的探测
         // 后面，而每一次探测都可能等满一次超时 —— 用户看得见的只有
         // 当前这一台，它必须先走。
-        if let id = selectedServerID { startConnecting(id) }
+        //
+        // 一台都没有时走另一条路：没有可以加载的东西，首屏直接露出
+        // 空状态（否则那块"正在打开 Mizar…"会一直盖着，而它永远等不到
+        // 任何东西）。
+        if let id = selectedServerID { startConnecting(id) } else { revealWithoutLoading() }
 
         // 列表页上每台服务端只做一次轻量探测，**不**拉全部数据 ——
         // 那会让打开列表变成一个几十次请求的动作。选中的那一台不走
@@ -194,8 +229,9 @@ public final class AppModel {
     /// 而调用它的是导航与推送深链 —— 让"点一下服务端"或"点开一条通知"
     /// 等一次网络往返，用户看到的就是"点了没反应"。
     ///
-    /// 现在它只做两件同步的事：把选中项改掉、把状态标成"连接中"
-    /// （界面据此**立刻**画出骨架），然后把连接交给后台任务。
+    /// 现在它只做三件同步的事：把选中项改掉、把状态标成"连接中"、
+    /// 把加载态摆上（界面据此**当帧**画出转圈与第一句状态文字），
+    /// 然后把连接交给后台任务。
     public func select(_ id: String) {
         let changed = selectedServerID != id
         if changed {
@@ -224,9 +260,12 @@ public final class AppModel {
     ///     不是三次意图，它们要的是同一件事。
     private func startConnecting(_ id: String, force: Bool = false, restart: Bool = false) {
         if !force, states[id] == .online, lastRefresh != nil { return }
-        // 状态先落到"连接中"：界面据此**立刻**画骨架，
+        // 状态先落到"连接中"：界面据此**立刻**画转圈，
         // 而不是等连接结束才决定显示什么。
         states[id] = .connecting
+        // 加载态在**同一处**摆上。它必须发生在下面那个"已经有一条在跑"
+        // 的早返回之前：那种情况下这一台确实还在加载，界面要看的就是它。
+        beginLoading(serverID: id, name: name(of: id), total: candidateCount(of: id))
 
         // 同一台服务端已经有一条连接在跑：复用它。
         if !restart, connectingServerID == id { return }
@@ -238,13 +277,26 @@ public final class AppModel {
         connectBatch += 1
         let batch = connectBatch
         connectTask = Task { [weak self] in
-            await self?.connectAndRefresh()
+            await self?.connectAndRefresh(batch: batch)
             // 只有"跑完的这一场仍是当前那一场"才清标记：被取消的那一场
             // 跑完时不能把**新**那一场的标记抹掉，否则下一次进前台会
             // 以为没有连接在跑，再开一场。
             guard let self, self.connectBatch == batch else { return }
             self.connectingServerID = nil
         }
+    }
+
+    /// 这台服务端的候选地址有几条（并发竞速是**同时**发起全部）。
+    ///
+    /// 读的是记录而不是会话：会话要读一次 Keychain，而这句话在
+    /// `select` 的同一帧里就要用上。数量算错只会让那一行文字偏一点，
+    /// 而为此多一次 Keychain 读取是拿真的代价换一个装饰。
+    private func candidateCount(of id: String) -> Int {
+        servers.first { $0.id == id }?.candidates().count ?? 0
+    }
+
+    private func name(of id: String) -> String {
+        servers.first { $0.id == id }?.name ?? tr2("服务端", "server")
     }
 
     /// 用户手动重试（"重试"按钮、下拉刷新）。
@@ -331,6 +383,10 @@ public final class AppModel {
             if selectedServerID == id {
                 selectedServerID = nil
                 clearServerData()
+                // 被移除的那一台如果正在加载，它的转圈要跟着停 ——
+                // 否则界面会停在一块永远不会有结果的加载屏上，
+                // 而用户刚刚才亲手把它删掉。
+                finishLoading(serverID: id)
             }
             await loadServers()
         }
@@ -342,10 +398,19 @@ public final class AppModel {
     ///
     /// 它是**后台任务**的入口（见 `select` 与 `startConnecting`），
     /// 因此不假设调用方在等它，也不假设中途没有被取消。
-    public func connectAndRefresh() async {
+    ///
+    /// - Parameter batch: 发起它的那一场的批次号（见 `connectBatch`）。
+    ///   它同时决定了两件事：跑完时要不要把状态落成终态，以及**要不要
+    ///   清掉加载态** —— 被取消的那一场跑完时不能把用户刚切过去那一台的
+    ///   转圈抹掉。
+    public func connectAndRefresh(batch: Int = -1) async {
         // 进场时把批次号记下来：下面那个 `defer` 要判断"跑完的这一场
         // 还是不是当前那一场"（见 `connectBatch`）。
-        let batch = connectBatch
+        let batch = batch < 0 ? connectBatch : batch
+        // 这一次尝试的进度从零开始记：失败那句话里的"试了几条、等了多久"
+        // 只能来自**这一场**，留着上一场的数字会让用户按着一个过期的
+        // 结论去查网络。
+        lastAttempt = nil
 
         // 冷启动时应用壳的 `.task` 与列表页的 `.task` 是并发跑的：
         // 读过记录不代表已经有人填过 `selectedServerID`。少了这一段，
@@ -355,23 +420,36 @@ public final class AppModel {
             hasLoadedServers = true
             selectedServerID = servers.first?.id
         }
-        guard let id = selectedServerID else { return }
+        guard let id = selectedServerID else {
+            // 一台服务端都没有：没有可以加载的东西，让首屏直接露出空状态。
+            revealWithoutLoading()
+            return
+        }
 
         states[id] = .connecting
         // "连接中"不能是终态：被取消（用户切走了）时如果不落一个确定的
-        // 状态，界面会永远停在骨架屏上，连"重试"都出不来。
+        // 状态，界面会永远停在加载屏上，连"重试"都出不来。
         //
         // 只在"自己仍是当前那一场"时落：被取消的那一场跑完时，新那一场
         // 可能已经开始了，而它刚把状态置成 `.connecting` —— 抹成 `.idle`
-        // 会让骨架屏卡在那里不动。
-        defer { if connectBatch == batch, states[id] == .connecting { states[id] = .idle } }
+        // 会让加载屏卡在那里不动。
+        defer {
+            if connectBatch == batch {
+                if states[id] == .connecting { states[id] = .idle }
+                // 加载态与状态**在同一处**收尾。分开收的话，两个终态之间
+                // 只要有一次没对齐，界面就会永远停在转圈上。
+                finishLoading(serverID: id)
+            }
+        }
 
         do {
-            let state = try await pool.connect(id: id)
+            let state = try await pool.connect(id: id) { [weak self] progress in
+                self?.noteProgress(progress, serverID: id)
+            }
             // 在途期间用户可能已经切到别的服务器：这一批结果属于上一台，
             // 写进去会让界面显示另一台机器的状态与数据。
             guard !Task.isCancelled, selectedServerID == id else { return }
-            states[id] = state
+            states[id] = enriched(state)
             guard state == .online else { return }
             if let session = try? await pool.session(for: id) {
                 role = await session.role
@@ -385,6 +463,12 @@ public final class AppModel {
                 try? await pool.setPublicHost(plan?.host, port: plan?.port, for: id)
             }
             guard !Task.isCancelled, selectedServerID == id else { return }
+            // 连上之后立刻换一句：用户从"在试地址"走到"在读数据"，
+            // 这两件事的等待感受完全不同（前者不知道要多久，后者是确定的）。
+            if let session = try? await pool.session(for: id),
+               let address = await session.address {
+                noteConnected(address: address, serverID: id)
+            }
             await refreshAll()
             guard !Task.isCancelled, selectedServerID == id else { return }
             startMetricsPolling()
@@ -394,11 +478,34 @@ public final class AppModel {
             guard !Task.isCancelled, selectedServerID == id else { return }
             states[id] = error.needsPairing
                 ? SessionState.needsPairing(error.message)
-                : SessionState.unreachable(error.message)
+                : SessionState.unreachable(enriched(error.message))
         } catch {
             guard !Task.isCancelled, selectedServerID == id else { return }
-            states[id] = SessionState.unreachable(error.localizedDescription)
+            states[id] = SessionState.unreachable(enriched(error.localizedDescription))
         }
+    }
+
+    /// 把"试了几条地址、等了多久"拼进连不上的那句话里。
+    ///
+    /// # 为什么这句话值得存在
+    ///
+    /// 用户分不清"应用卡了"与"网络慢"，而这两件事的**证据**其实一直在
+    /// 手上：刚刚有几条候选地址、每条等了多久，客户端全都知道。把它写
+    /// 出来，那句"连不上"就从"没反应"变成了"它试了 8 条、用了 4 秒，
+    /// 都不是" —— 前者让人怀疑应用，后者让人去查网络。
+    ///
+    /// 只用一条地址时不加这句：那时没有任何"试了很多次"的信息，
+    /// 而多出来的数字只会让文案变长。
+    private func enriched(_ state: SessionState) -> SessionState {
+        guard case .unreachable(let detail) = state else { return state }
+        return .unreachable(enriched(detail))
+    }
+
+    private func enriched(_ detail: String) -> String {
+        guard let attempt = lastAttempt, attempt.total > 1 else { return detail }
+        let seconds = max(1, Int(attempt.elapsed.rounded(.up)))
+        return tr2("已经试过 \(attempt.total) 条地址、等了 \(seconds) 秒，都没有回应 —— ",
+                   "Tried \(attempt.total) addresses over \(seconds) s, none answered — ") + detail
     }
 
     /// 拉取全部数据。
@@ -413,13 +520,18 @@ public final class AppModel {
         guard let session = try? await pool.session(for: id),
               let kernel = try? await session.kernel() else { return }
 
-        async let appsTask: [AppRecord]? = attempt { try await kernel.apps() }
-        async let advisoriesTask: [Advisory]? = attempt { try await kernel.advisories() }
-        async let ipTask: IPStatus? = attempt { try await kernel.currentIP() }
-        async let certsTask: [CertificateInfo]? = attempt { try await kernel.certificates() }
-        async let ddnsTask: [DdnsTaskInfo]? = attempt { try await kernel.ddnsTasks() }
-        async let credentialsTask: [CredentialInfo]? = attempt { try await kernel.credentials() }
-        async let proxyTask: ProxyStatus? = attempt { try await kernel.proxyStatus() }
+        // 七个请求完成了几个 —— 界面那一行"正在读取数据（3/7）"就是它。
+        // 计数跨子任务共享，因此放一个 actor 里：一个普通的 `var` 会被
+        // 并发写，而这不是"大概率没事"的那类问题。
+        let counter = FetchCounter(total: 7, serverID: id)
+
+        async let appsTask: [AppRecord]? = attempt(counter) { try await kernel.apps() }
+        async let advisoriesTask: [Advisory]? = attempt(counter) { try await kernel.advisories() }
+        async let ipTask: IPStatus? = attempt(counter) { try await kernel.currentIP() }
+        async let certsTask: [CertificateInfo]? = attempt(counter) { try await kernel.certificates() }
+        async let ddnsTask: [DdnsTaskInfo]? = attempt(counter) { try await kernel.ddnsTasks() }
+        async let credentialsTask: [CredentialInfo]? = attempt(counter) { try await kernel.credentials() }
+        async let proxyTask: ProxyStatus? = attempt(counter) { try await kernel.proxyStatus() }
 
         let results = await (appsTask, advisoriesTask, ipTask, certsTask, ddnsTask, credentialsTask, proxyTask)
 
@@ -435,6 +547,10 @@ public final class AppModel {
         if let value = results.5 { credentials = value }
         if let value = results.6 { proxyStatus = value }
         lastRefresh = Date()
+        // 数据到手，加载态就在**这一刻**结束 —— 而不是等 `connectAndRefresh`
+        // 的收尾（那还要跑一次手表同步）。界面从转圈切到内容的时机，
+        // 应该与"内容真的到了"是同一帧。
+        finishLoading(serverID: id)
     }
 
     /// 当前这台服务端的数据是否已经拿到过至少一次。
@@ -445,6 +561,78 @@ public final class AppModel {
     /// 与**确实没有内容**（"还没有站点"）。少了这个区分，连接中的那几秒
     /// 界面上写的是"还没有站点" —— 一句让人以为配置丢了的话。
     public var hasLoadedData: Bool { lastRefresh != nil }
+
+    // MARK: - 加载态
+
+    /// 整个窗口要不要被加载态盖住。
+    ///
+    /// # 为什么冷启动要盖住**整个**窗口，而切服务器不盖
+    ///
+    /// 冷启动时侧栏还是空的（记录刚读出来），两边都没有可看的东西，
+    /// 而用户上一眼看到的是启动屏 —— 整屏盖住是连续的一步。更实际的是：
+    /// iPhone 上 `NavigationSplitView` 冷启动显示的是**列表**那一侧，
+    /// 只盖详情页的话，用户在最需要"它在动"的那几秒里什么都看不到。
+    ///
+    /// 切服务器不盖，因为那一刻用户的手正放在侧栏上（他刚点完）。
+    /// 把侧栏也盖掉，他一台连不上就既看不到别的服务端、也点不了重试 ——
+    /// 那才是真的"卡住了"。详情页那一侧照常显示加载态（`loading(for:)`）。
+    public var launchCover: LoadingStatus? {
+        // 记录还没读出来：此刻侧栏是空的、右侧也没有内容，先盖住。
+        guard hasLoadedServers else { return .openingRecords(at: launchedAt) }
+        guard let loading, !hasRevealedInterface else { return nil }
+        return loading
+    }
+
+    /// 某台服务端是不是正在加载（详情页据此决定画加载态还是画页签）。
+    public func loading(for serverID: String) -> LoadingStatus? {
+        guard let loading, loading.serverID == serverID else { return nil }
+        return loading
+    }
+
+    /// 开始一次加载。
+    ///
+    /// **手上已经有数据时不进加载态**：`enterForeground` 每次都会重连一次
+    /// （长轮询停了，快照可能过期），而那不该把已经画好的读数换成一块
+    /// 加载屏 —— 用户从后台切回来看到的是同一屏数字在刷新，而不是倒退。
+    private func beginLoading(serverID: String, name: String, total: Int) {
+        guard !hasLoadedData else { return }
+        // 同一台服务端已经在加载时**不重开秒表**：`select` 会被系统调用
+        // 多次（侧栏重排、键盘上下键），每次都从 0 开始的话，秒表会在
+        // 一个连接里来回跳。
+        if loading?.serverID == serverID { return }
+        loading = .connecting(serverID: serverID, name: name, total: total)
+    }
+
+    /// 一次竞速的进度。见 `ServerSession.connect(progress:)`。
+    private func noteProgress(_ progress: ConnectProgress, serverID: String) {
+        lastAttempt = progress
+        guard loading?.serverID == serverID else { return }
+        loading?.racing(progress)
+    }
+
+    /// 已经连上了某个地址，接下来在拉数据。
+    private func noteConnected(address: String, serverID: String) {
+        guard loading?.serverID == serverID else { return }
+        loading?.connected(address: address)
+    }
+
+    /// 结束一次加载。
+    ///
+    /// - Parameter serverID: 只结束这一台的加载。传别的服务端 id 时什么
+    ///   都不做 —— 被取消的那一次连接**不能**把用户刚切过去那一台的
+    ///   加载态抹掉（那会让界面永远停在上一台的旧界面上）。
+    private func finishLoading(serverID: String? = nil) {
+        if let loading, serverID == nil || loading.serverID == serverID {
+            self.loading = nil
+        }
+        if loading == nil { hasRevealedInterface = true }
+    }
+
+    /// 没有东西可加载（一台服务端都没有）时，让首屏直接露面。
+    private func revealWithoutLoading() {
+        guard loading == nil else { return }
+        hasRevealedInterface = true
+    }
 
     public func refreshMetrics() async {
         guard let id = selectedServerID,
@@ -690,7 +878,12 @@ public final class AppModel {
             hasLoadedServers = true
         }
         if selectedServerID == nil { selectedServerID = servers.first?.id }
-        if let id = selectedServerID { startConnecting(id, force: true) }
+        if let id = selectedServerID {
+            startConnecting(id, force: true)
+        } else {
+            // 一台服务端都没有：见 `loadServers` 里的同一句。
+            revealWithoutLoading()
+        }
     }
 
     // MARK: - 小工具
@@ -700,12 +893,49 @@ public final class AppModel {
         do { return try await work() } catch { return nil }
     }
 
+    /// 同上，但每完成一项就报一次进度（界面那行"（3/7）"）。
+    ///
+    /// 成功与失败**都算完成**：这两件事对"还要等多久"是同一件事，
+    /// 而失败的那几项本来就是靠 `attempt` 单独容错的。
+    private func attempt<T>(_ counter: FetchCounter, _ work: () async throws -> T) async -> T? {
+        let value = try? await work()
+        let step = await counter.advance()
+        // 切走之后这一批属于上一台，进度不能再写进新那一台的加载态。
+        if step.serverID == selectedServerID, loading?.serverID == step.serverID {
+            loading?.fetching(done: step.done, of: step.total)
+        }
+        return value
+    }
+
     public var canWrite: Bool { role == "operator" }
 }
 
 /// 模型层的取词。视图用 `MizarUI` 里的 `tr`，而模型层也要用同一套。
 func tr2(_ zh: String, _ en: String) -> String {
     Locale.preferredLanguages.first?.hasPrefix("zh") == true ? zh : en
+}
+
+/// 一次全量刷新里已经完成了几个请求。
+///
+/// # 为什么必须是 actor
+///
+/// 它被七个并发的 `async let` 同时写。用一个 `var` 加注释说"其实不会
+/// 真的并发"是不成立的：这正是 Swift 6 要拦下的那类事，而且它出错时
+/// 表现出来只是界面上的数字偶尔跳一下 —— 没有人会为此去查。
+private actor FetchCounter {
+    private let total: Int
+    private let serverID: String
+    private var done = 0
+
+    init(total: Int, serverID: String) {
+        self.total = total
+        self.serverID = serverID
+    }
+
+    func advance() -> (done: Int, total: Int, serverID: String) {
+        done += 1
+        return (done, total, serverID)
+    }
 }
 
 /// 设备自述信息。

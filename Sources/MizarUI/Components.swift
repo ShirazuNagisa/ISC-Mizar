@@ -285,14 +285,20 @@ public struct Card<Content: View>: View {
 
 /// 连接中/还未拿到数据时的占位骨架。
 ///
-/// # 为什么是骨架，而不是转圈，也不是空状态
+/// # 它在新的加载态里还剩什么位置
 ///
-/// "转圈"只说明进程在忙，它不告诉用户这一页**将要有**什么；而空状态
-/// （"还没有站点"）在数据还没到的那几秒里是一句**假话** —— 用户会以为
-/// 配置丢了，然后去做一些没必要的事（重新配对、重启内核）。
+/// 冷启动与服务端切换那两条路现在走 `LoadingPanel`（转圈 + 会变的状态
+/// 文字）—— **静态**骨架在那两条路上是错的：它长得像"已经渲染完了但内容
+/// 是空的"，而不是"正在加载"，用户的读法是"卡住了"。
 ///
-/// 骨架把页面的形状先摆出来，数据到了就地替换：感知是"内容立刻出现，
-/// 正在填"，而不是"点了没反应"或"东西没了"。
+/// 骨架仍然有用，但只在**局部**：页签已经在屏幕上、而某一项数据还没到
+/// 的那一小段时间。那时把这一页的形状先摆出来（"这里会有一列东西"）比
+/// 再插一个转圈更有信息量 —— 页面的骨架没有变，只是内容还没填。
+///
+/// # 它为什么在动
+///
+/// 静止的灰条与"界面冻住了"在视觉上是同一件事。一层缓慢的明暗呼吸
+/// 是这里最便宜、也最不需要解释的存活信号（`SkeletonPulse`）。
 ///
 /// # 为什么画的是几何形状，而不是给真实内容套 `.redacted`
 ///
@@ -323,13 +329,14 @@ public struct SkeletonRows: View {
             }
         }
         .foregroundStyle(.quaternary)
+        .skeletonPulse()
         .accessibilityLabel(tr("正在读取…", "Loading…"))
     }
 }
 
 /// 整页的卡片骨架。
 ///
-/// 用在"详情页已经在屏幕上、但数据还没到"的那一小段时间 ——
+/// 用在"详情页已经在屏幕上、但某一项数据还没到"的那一小段时间 ——
 /// 页签内部的骨架管不到它。它自己**不带** `ScrollView`：调用方要么
 /// 已经在滚动容器里（页签），要么自己包一层。
 public struct SkeletonCards: View {
@@ -350,6 +357,145 @@ public struct SkeletonCards: View {
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityLabel(tr("正在读取…", "Loading…"))
+    }
+}
+
+/// 数据到位之前的那一块加载态。
+///
+/// # 它要回答的问题是"应用是不是死了"
+///
+/// 用户分不清"网络慢"与"应用卡了"，而这两件事在屏幕上的区别只有一个：
+/// **有没有东西在变**。因此这里刻意同时给三个层次的"在动"：
+///
+///	1. `ProgressView` —— 系统画的转圈。它由渲染服务驱动，**不占主线程**
+///	   （这一条是前提：如果主线程真的被占住，什么动画都会停，
+///	   再好的加载态也救不了）。
+///	2. `title` / `detail` —— **会变**的文字。`detail` 由模型推进
+///	   （"8 条地址中已有 3 条没有回应" → "正在读取数据（4/7）"），
+///	   它不是装饰：一个转了 30 秒而一个字都没变的转圈，与死机给用户的
+///	   感受是一样的。
+///	3. `ElapsedLine` —— 等了多久。**只在超过 1 秒之后出现**，向上计数，
+///	   没有进度条、没有百分比、没有预计剩余时间。理由是取舍：短等待
+///	   不需要它（多一行文字只是噪音），而长等待里它把"卡住了"变成
+///	   "这件事确实慢，已经 7 秒了" —— 让人能做决定的是时长，不是动画。
+///	   反过来做成倒计时或假的百分比，只会把"我在等"变成"我该催它"。
+///	   （门槛为什么从 3 秒改成 1 秒，见 `ElapsedLine`。）
+///
+/// # 为什么它自带一层不透明背景
+///
+/// 它的用法有两种：盖住整个窗口（冷启动）与只盖详情页（切换服务端）。
+/// 两种都要**挡住**下面还没准备好的界面 —— 半透明的加载态会让用户看到
+/// 底下那个"还没有服务端"的空状态，而那正是这一层要避免的误读。
+public struct LoadingPanel: View {
+    public let title: String
+    public let detail: String
+    /// 这次加载是什么时候开始的。
+    public let startedAt: Date
+
+    public init(title: String, detail: String, startedAt: Date) {
+        self.title = title
+        self.detail = detail
+        self.startedAt = startedAt
+    }
+
+    public var body: some View {
+        VStack(spacing: 12) {
+            ProgressView()
+                .controlSize(.large)
+
+            Text(title)
+                .font(.headline)
+                .multilineTextAlignment(.center)
+
+            Text(detail)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                // 宽度与高度都要钉住（ISC-Core 的 D33）：状态文字里有
+                // 地址（可能是很长的 IPv6），它会把自己的理想宽度向上
+                // 传播，把整块布局撑坏。
+                .frame(maxWidth: Theme.messageMaxWidth)
+                .fixedSize(horizontal: false, vertical: true)
+
+            ElapsedLine(startedAt: startedAt)
+        }
+        .padding(24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(.background)
+        // 转圈与文字是同一个"正在做这件事"的整体：VoiceOver 逐个读
+        // 会把一句完整的状态拆成三段。
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// 已经等了多久。
+///
+/// 秒数由 `TimelineView` 每秒推进一次 —— 这个视图只有一块很小的文字，
+/// 因此每秒重画的代价可以忽略；而它换来的正是"屏幕上有东西在动"这一条
+/// 最直接的证据。
+///
+/// # 第几秒开始显示：1 秒，而不是 3 秒
+///
+/// 一开始写的是 3 秒，理由是"短等待不需要它"。在模拟器上实拍之后这个
+/// 数字被改掉了：一场候选地址竞速的超时预算只有 4 秒（
+/// `ServerSession.probeTimeout`），而**一条都不回应**（Phecda 关机、
+/// 或者手机连着一个不再存在的网段）时，那 4 秒里没有任何一条失败可报
+/// —— 状态文字整段不变。3 秒的门槛意味着秒表只来得及露一秒，甚至一次
+/// 都不露：实测时那一行自始至终没出现过，屏幕上就是一个不动的转圈加
+/// 一句不变的字，正是这一层要消灭的东西。
+///
+/// 1 秒的依据：局域网里的连接正常在几十毫秒内结束，这个数字根本不会
+/// 出现；而超过一秒的等待，已经是用户开始怀疑"是不是卡住了"的时刻。
+///
+/// # 为什么空间是**预留**的
+///
+/// 那一行始终占着位置，只是用透明度淡入。否则它出现的那一刻会把上面
+/// 三行整体顶上去十几点 —— 一次莫名其妙的跳动比多一行小字更容易让人
+/// 以为界面出了问题。
+private struct ElapsedLine: View {
+    let startedAt: Date
+
+    private static let threshold: TimeInterval = 1
+
+    var body: some View {
+        TimelineView(.periodic(from: startedAt, by: 1)) { context in
+            let seconds = Int(context.date.timeIntervalSince(startedAt).rounded(.down))
+            Text(tr("已等待 \(seconds) 秒", "\(seconds) s and counting"))
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+                .monospacedDigit()
+                .opacity(seconds >= Int(Self.threshold) ? 1 : 0)
+                // 每秒都变的东西不该被反复播报：用户要听的是状态，
+                // 不是一只秒表。
+                .accessibilityHidden(true)
+        }
+    }
+}
+
+extension View {
+    /// 给骨架加一层缓慢的明暗呼吸。
+    ///
+    /// 降低动效打开时**不动**：那是一个明确的系统偏好，而这里的动画
+    /// 本来只是"我还活着"的信号 —— 加载态上面的转圈与状态文字仍然
+    /// 在告诉用户同一件事。
+    func skeletonPulse() -> some View {
+        modifier(SkeletonPulse())
+    }
+}
+
+private struct SkeletonPulse: ViewModifier {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var dimmed = false
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(dimmed ? 0.45 : 0.95)
+            .onAppear {
+                guard !reduceMotion else { return }
+                withAnimation(.easeInOut(duration: 1.1).repeatForever(autoreverses: true)) {
+                    dimmed = true
+                }
+            }
     }
 }
 

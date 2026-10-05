@@ -395,13 +395,82 @@ private func makeRecord(addresses: [String] = ["192.168.1.10:8788", "10.0.0.5:87
     }
 }
 
+/// 竞速的进度必须**在每条候选得到结论时**报出来，而且不能倒退。
+///
+/// # 这条测试钉的是界面上那一行字
+///
+/// 一场竞速最坏要等满一次超时（4 秒），而这 4 秒里屏幕上如果只有一个
+/// 转圈、一行字都不变，用户读到的就是"卡住了" —— 而系统此刻可能正在
+/// 判定这个应用有没有响应。进度数字是那段等待里**唯一会变的东西**。
+@MainActor
+@Test func sessionReportsEveryFailedCandidateAsProgress() async {
+    // 四条都连不上（工厂给不出传输 → 立刻失败）。
+    let addresses = (1...4).map { "10.0.0.\($0):8788" }
+    let session = ServerSession(record: makeRecord(addresses: addresses), token: "tok",
+                                makeTransport: factory([:]))
+
+    let recorder = ProgressRecorder()
+    _ = await session.connect { recorder.record($0) }
+
+    let events = recorder.events
+    #expect(events.first?.total == 4, "第一条进度必须已经说明这一轮有几条候选")
+    #expect(events.first?.finished == 0, "第一条进度里还没有任何一条失败")
+    #expect(events.last?.finished == 4, "四条全部失败之后必须报到 4，实际 \(events.map(\.finished))")
+    #expect(events.map(\.finished) == events.map(\.finished).sorted(),
+            "进度不能倒退：界面上的数字往回跳比不动更像出错")
+    #expect(events.allSatisfy { $0.elapsed >= 0 })
+}
+
+/// 有赢家时，进度里**永远不会**出现"全部都失败了"。
+///
+/// 这条不是数学洁癖：界面把那个数字直接写成"8 条里 8 条没有回应"，
+/// 而一次**成功**的连接要是先闪一下这句话，用户看到的就是一次自相
+/// 矛盾的结论（"都说没回应，可它连上了"）。
+@MainActor
+@Test func aWinningRaceNeverReportsEveryAddressAsFailed() async {
+    let hanging = (0..<4).map { _ in HangingTransport() }
+    let winner = GatedSuccessTransport(rivals: hanging, body: selfResponse)
+
+    var addresses: [String] = []
+    var routes: [String: any KernelTransport] = [:]
+    for (index, transport) in hanging.enumerated() {
+        let address = "10.0.0.\(index + 1):8788"
+        addresses.append(address)
+        routes["https://\(address)"] = transport
+    }
+    addresses.append("public.example.com:8788")
+    routes["https://public.example.com:8788"] = winner
+    let byAddress = routes
+
+    let session = ServerSession(record: makeRecord(addresses: addresses), token: "tok",
+                                makeTransport: { byAddress[$0.baseURL.absoluteString] ?? StubTransport() })
+
+    let recorder = ProgressRecorder()
+    let state = await session.connect { recorder.record($0) }
+
+    #expect(state == .online)
+    #expect(!recorder.events.isEmpty, "发起竞速时至少要有第一条进度")
+    #expect(recorder.events.allSatisfy { $0.finished < $0.total },
+            "有赢家时不可能出现「全部都失败」，实际 \(recorder.events.map { "\($0.finished)/\($0.total)" })")
+}
+
+/// 收集进度回调。
+///
+/// 回调被声明成 `@MainActor`（见 `ConnectProgressHandler`），因此这里也
+/// 挂在主 actor 上 —— 换个隔离域就得自己加锁，而那就等于把"顺序有保证"
+/// 这件事从类型上丢掉，再在实现里手工补回来。
+@MainActor
+private final class ProgressRecorder {
+    private(set) var events: [ConnectProgress] = []
+    func record(_ progress: ConnectProgress) { events.append(progress) }
+}
+
 /// 竞速之下，"够到了内核但身份不对"仍然比"连不上"更该被报出来。
 ///
 /// 这两句话对应两个完全不同的动作：一个是"去 Phecda 上核对这台机器"，
 /// 一个是"检查网络与内核"。报错了后者，用户会把一个身份问题当成网络
 /// 问题查下去。
-@Test func sessionRacingPrefersIdentityChangeOverUnreachable() async {
-    let reachable = StubTransport()
+@Test func sessionRacingPrefersIdentityChangeOverUnreachable() async {    let reachable = StubTransport()
     await reachable.enqueue("GET", "/v1/remote/self",
                             .failure("identity_changed", 0, "服务器身份已变化。"))
 

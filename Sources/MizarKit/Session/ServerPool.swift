@@ -94,9 +94,13 @@ public actor ServerPool {
     }
 
     /// 连接一台服务端。
-    public func connect(id: String) async throws -> SessionState {
+    ///
+    /// `progress` 只做转发（见 `ServerSession.connect`）：池这一层不关心
+    /// 进度，但界面上那条"已有几条地址没回应"必须从竞速内部出来 ——
+    /// 在这里重新数一遍是不可能的，失败发生在每一条候选各自的子任务里。
+    public func connect(id: String, progress: ConnectProgressHandler? = nil) async throws -> SessionState {
         let session = try await session(for: id)
-        let state = await session.connect(language: language)
+        let state = await session.connect(language: language, progress: progress)
 
         // 连上之后把角色与地址同步回记录：角色来自**服务端**，
         // 而记录里的那一份只用于离线时画界面。

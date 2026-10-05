@@ -39,6 +39,17 @@ struct WatchRootView: View {
     @Bindable var model: AppModel
 
     var body: some View {
+        // 首屏加载态与手机上是同一块组件、同一份模型状态：手表的主线程
+        // 比手机更早被系统判无响应，而它上面能"动"的东西更少 ——
+        // 一圈转不完的进度条比一行不动的"连接中"更能说明问题。
+        if let cover = model.launchCover {
+            LoadingPanel(title: cover.title, detail: cover.detail, startedAt: cover.startedAt)
+        } else {
+            serverList
+        }
+    }
+
+    private var serverList: some View {
         NavigationStack {
             List {
                 ForEach(model.servers) { server in
@@ -70,6 +81,26 @@ struct WatchOverviewView: View {
     let server: ServerRecord
 
     var body: some View {
+        Group {
+            // 加载态优先：这一页在数据到位之前什么都不该画。
+            // 以前它写的是一行静止的"连接中…"，那与卡住没有区别。
+            if let loading = model.loading(for: server.id) {
+                LoadingPanel(title: loading.title, detail: loading.detail,
+                             startedAt: loading.startedAt)
+            } else {
+                content
+            }
+        }
+        .navigationTitle(server.name)
+        .task {
+            // `select` 是同步的：它把状态标成"连接中"就返回，连接在后台
+            // 跑。等它的话，手表上打开这一页会先卡住（而手表的主线程
+            // 被占住几秒，系统会直接判定应用无响应）。
+            model.select(server.id)
+        }
+    }
+
+    private var content: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
                 let state = model.state(of: server.id)
@@ -103,13 +134,6 @@ struct WatchOverviewView: View {
                 }
             }
             .padding(.horizontal, 4)
-        }
-        .navigationTitle(server.name)
-        .task {
-            // `select` 是同步的：它把状态标成"连接中"就返回，连接在后台
-            // 跑。等它的话，手表上打开这一页会先卡住（而手表的主线程
-            // 被占住几秒，系统会直接判定应用无响应）。
-            model.select(server.id)
         }
     }
 
