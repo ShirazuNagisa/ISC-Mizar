@@ -126,6 +126,25 @@ public final class AppModel {
     /// 只有用户明确要求（"重试"按钮、切到另一台）才会掐掉重开。
     private var connectingServerID: String?
 
+    /// 这**一次前台会话**里已经为哪些服务端发起过连接。
+    ///
+    /// # 为什么"已经在跑就复用"不够
+    ///
+    /// 上面那个标记回答的是"此刻有没有一条连接在跑"，也就是一个**时间**
+    /// 条件。而 Phecda 关机时一场竞速的结局是几十毫秒之内就出来的
+    /// （连接被拒），于是应用壳的 `.task`、`scenePhase` 变 `.active`、
+    /// 列表页的 `.task` 这三声几乎同时到达的"连一次"里，只有第一声
+    /// 撞上那场还在跑的竞速 —— 后面两声响的时候它已经跑完、
+    /// `connectingServerID` 已经被清掉了，于是各开一场新的。
+    ///
+    /// 三个触发点表达的是**同一个意图**，因此去重必须按意图而不是按时间：
+    /// 在一次前台会话里，"把当前这台接上"只生效一次；回到后台再回来
+    /// （`enterBackground`）才算新的一次。
+    ///
+    /// 用户明确要求的动作不受它影响 —— `select`（换一台）、`retry`
+    /// （重试按钮）、下拉刷新传的都是 `restart: true`。
+    private var connectStartedInThisForeground: Set<String> = []
+
     /// 连接批次号。
     ///
     /// 用来回答"刚刚跑完的这一场还是不是当前那一场"：被取消的那一场
@@ -161,7 +180,13 @@ public final class AppModel {
 
     // MARK: - 服务端列表
 
-    public func loadServers() async {
+    /// 读一遍服务端记录，把当前那一台接上，再探测其余的状态点。
+    ///
+    /// - Parameter reconnecting: 用户**明确**要求重连当前那一台
+    ///   （下拉刷新）。默认 false：列表页出现时的那一次调用与冷启动的
+    ///   另外两个触发点表达的是同一个意图，不该各开一场竞速 ——
+    ///   见 `connectStartedInThisForeground`。
+    public func loadServers(reconnecting: Bool = false) async {
         await reloadRecords()
         if selectedServerID == nil { selectedServerID = servers.first?.id }
 
@@ -174,7 +199,11 @@ public final class AppModel {
         // 一台都没有时走另一条路：没有可以加载的东西，首屏直接露出
         // 空状态（否则那块"正在打开 Mizar…"会一直盖着，而它永远等不到
         // 任何东西）。
-        if let id = selectedServerID { startConnecting(id) } else { revealWithoutLoading() }
+        if let id = selectedServerID {
+            startConnecting(id, restart: reconnecting)
+        } else {
+            revealWithoutLoading()
+        }
 
         // 列表页上每台服务端只做一次轻量探测，**不**拉全部数据 ——
         // 那会让打开列表变成一个几十次请求的动作。选中的那一台不走
@@ -255,11 +284,21 @@ public final class AppModel {
     ///
     /// - Parameters:
     ///   - force: 已经连上且数据在手时也重连（进前台、用户手动重试）。
-    ///   - restart: 已经有一次连接在跑时**掐掉它重开**。只有用户明确的
-    ///     要求（"重试"按钮、切到另一台）才为 true —— 冷启动那三次调用
-    ///     不是三次意图，它们要的是同一件事。
+    ///   - restart: 已经有一次连接在跑时**掐掉它重开**，并且**忽略
+    ///     "这一次前台会话里已经连过"那条去重**。只有用户明确的要求
+    ///     （"重试"按钮、切到另一台、下拉刷新）才为 true —— 冷启动那三次
+    ///     调用不是三次意图，它们要的是同一件事。
     private func startConnecting(_ id: String, force: Bool = false, restart: Bool = false) {
         if !force, states[id] == .online, lastRefresh != nil { return }
+
+        // 这一次前台会话里已经为这台发起过连接：不再重开，**也不动状态**。
+        //
+        // 这一条必须在下面那两处赋值之前：既然不打算开新的一场，就不能把
+        // 状态重新标成 `.connecting`、也不能把加载态再摆一遍 —— 那个竞速
+        // 已经跑完并落了终态，这里再改一次只会让界面停在一个永远等不到
+        // 结果的转圈上（连接失败之后连"重试"都出不来）。
+        if !restart, connectStartedInThisForeground.contains(id) { return }
+
         // 状态先落到"连接中"：界面据此**立刻**画转圈，
         // 而不是等连接结束才决定显示什么。
         states[id] = .connecting
@@ -269,6 +308,8 @@ public final class AppModel {
 
         // 同一台服务端已经有一条连接在跑：复用它。
         if !restart, connectingServerID == id { return }
+
+        connectStartedInThisForeground.insert(id)
 
         // 一次只连一台：前一个连接还在跑时它已经过时了（用户切走了），
         // 让它继续只会多占一份网络与一份令牌探测。
@@ -606,8 +647,16 @@ public final class AppModel {
     /// 一次竞速的进度。见 `ServerSession.connect(progress:)`。
     private func noteProgress(_ progress: ConnectProgress, serverID: String) {
         lastAttempt = progress
-        guard loading?.serverID == serverID else { return }
-        loading?.racing(progress)
+        guard loading?.serverID == serverID, let current = loading else { return }
+        var next = current
+        next.racing(progress)
+        // 文字没变就**不发布**。
+        //
+        // `@Observable` 不做相等判断：一次赋值就是一次视图失效。而只有
+        // 一条候选地址时（"只连局域网那一台"是最常见的一种配置）那句
+        // 文字从头到尾是同一句 —— 一次竞速却会为它发布两遍。
+        guard next != current else { return }
+        loading = next
     }
 
     /// 已经连上了某个地址，接下来在拉数据。
@@ -852,7 +901,11 @@ public final class AppModel {
     ///
     /// 不停的话系统会在挂起时把它们静默掐断，而恢复时我们手上会留着一堆
     /// 半死的连接 —— 那比"明确地停掉再重连"更难排查。
+    ///
+    /// 同时清掉"这一次前台会话已经连过"的标记：回到前台是**新的一次**
+    /// 意图，长轮询已经停了，手上的快照也可能过期，必须重连。
     public func enterBackground() {
+        connectStartedInThisForeground.removeAll()
         stopPolling()
     }
 

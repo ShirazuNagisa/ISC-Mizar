@@ -397,6 +397,106 @@ struct AppModelTests {
         model.select("srv-nowhere")
     }
 
+    /// 服务端**关机**时，冷启动那三个触发点也必须只开一场竞速。
+    ///
+    /// # 上一条测试钉不住这一条，而真机上出事的正是这一条
+    ///
+    /// `coldLaunchStartsOneRaceNotThree` 用的是一台**挂住**的假服务端，
+    /// 于是三次触发全都落在"已经有一条连接在跑"的窗口里 —— 靠"在跑就
+    /// 复用"就能通过。而用户报的场景恰好相反：Phecda 没开，每条候选
+    /// 地址被连接拒绝，**一场竞速几十毫秒就结束了**。后两声到达时上一场
+    /// 已经跑完、`connectingServerID` 也被清掉了，于是各开一场新的。
+    ///
+    /// 去重因此不能是一个**时间**条件（"此刻有没有在跑"），必须是一个
+    /// **意图**条件（"这一次前台会话里为这台连过了没有"）。
+    @MainActor
+    @Test func aFastFailingColdLaunchStillStartsOneRace() async throws {
+        let dir = tempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let addresses = (1...8).map { "10.0.0.\($0):8788" }
+        let record = makeRecord(addresses: addresses)
+        try await ServerStore(directory: dir).upsert(record)
+        let tokens = InMemoryTokenStore()
+        try await tokens.setToken("tok", for: record.id)
+
+        let started = ConnectionCounter()
+        let model = AppModel(directory: dir, tokens: tokens, makeTransport: { _ in
+            started.bump()
+            return UnreachableTransport()
+        })
+
+        // 触发一：应用壳的 `.task`。等它**跑完** —— 这正是关键。
+        // 服务端关机时它几十毫秒就结束了，而下面两声紧接着到达。
+        await model.enterForeground()
+        #expect(await waitForConnections(started, toReach: addresses.count),
+                "第一声应当开一场竞速")
+        try? await Task.sleep(for: .milliseconds(50))
+
+        // 触发二、三：`scenePhase` 变 `.active`、列表页的 `.task`。
+        await model.enterForeground()
+        await model.loadServers()
+        try? await Task.sleep(for: .milliseconds(200))
+
+        #expect(started.count == addresses.count,
+                "一次冷启动只该有一场竞速（\(addresses.count) 条候选），实际发起了 \(started.count) 条")
+    }
+
+    /// 回到后台再回来是**新的一次**意图，必须重连。
+    ///
+    /// 与上一条是一对：去重做过头就会变成"从后台切回来不再刷新"，
+    /// 而那时长轮询已经停了、快照也可能过期。少了这一条，上面那条修法
+    /// 可以简单地通过"永远只连一次"来满足。
+    @MainActor
+    @Test func returningFromTheBackgroundStartsANewRace() async throws {
+        let dir = tempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let record = makeRecord(addresses: ["10.0.0.1:8788"])
+        try await ServerStore(directory: dir).upsert(record)
+        let tokens = InMemoryTokenStore()
+        try await tokens.setToken("tok", for: record.id)
+
+        let started = ConnectionCounter()
+        let model = AppModel(directory: dir, tokens: tokens, makeTransport: { _ in
+            started.bump()
+            return UnreachableTransport()
+        })
+
+        await model.enterForeground()
+        #expect(await waitForConnections(started, toReach: 1), "第一次进前台要连")
+
+        model.enterBackground()
+        await model.enterForeground()
+        #expect(await waitForConnections(started, toReach: 2),
+                "回到前台必须再连一次（长轮询停了，快照可能过期）")
+    }
+
+    /// 下拉刷新是用户明确的"再试一次"，不能被去重吃掉。
+    @MainActor
+    @Test func pullToRefreshStillStartsANewRace() async throws {
+        let dir = tempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let record = makeRecord(addresses: ["10.0.0.1:8788"])
+        try await ServerStore(directory: dir).upsert(record)
+        let tokens = InMemoryTokenStore()
+        try await tokens.setToken("tok", for: record.id)
+
+        let started = ConnectionCounter()
+        let model = AppModel(directory: dir, tokens: tokens, makeTransport: { _ in
+            started.bump()
+            return UnreachableTransport()
+        })
+
+        await model.enterForeground()
+        #expect(await waitForConnections(started, toReach: 1))
+
+        await model.loadServers(reconnecting: true)
+        #expect(await waitForConnections(started, toReach: 2),
+                "下拉刷新的全部意义就是再试一次，它必须真的重开一场")
+    }
+
     /// 用户按下"重试"必须真的重开一场，不能被上面那个复用逻辑吃掉。
     ///
     /// # 为什么这两条要放在一起

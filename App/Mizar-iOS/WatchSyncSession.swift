@@ -81,12 +81,17 @@ final class PhoneWatchSession: NSObject, WCSessionDelegate {
         guard WCSession.isSupported() else { return .skippedUnsupported }
         let session = WCSession.default
 
-        return await pusher.push(counterpart: WatchCounterpart(
+        // 属性取值用的是**闭包**：未激活时 `WatchCounterpart.current`
+        // 根本不会调用它们，也就不会有那两次到手表守护进程的属性读取
+        // 落在主 actor 上。参数如果按值传（`isPaired: session.isPaired`），
+        // 它们在调用**之前**就已经求值了，下面那道 `guard` 再对也拦不住。
+        let counterpart = WatchCounterpart.current(
             isSupported: true,
             isActivated: session.activationState == .activated,
-            isPaired: session.isPaired,
-            isWatchAppInstalled: session.isWatchAppInstalled
-        ), force: force) { [model] in
+            isPaired: { session.isPaired },
+            isWatchAppInstalled: { session.isWatchAppInstalled })
+
+        return await pusher.push(counterpart: counterpart, force: force) { [model] in
             guard let payload = await model?.prepareWatchSync() else { return nil }
             return try? payload.encode()
         }

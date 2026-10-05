@@ -40,6 +40,31 @@ public nonisolated struct WatchCounterpart: Sendable, Equatable {
     /// 成立才谈得上投递，而漏掉任意一个的后果都是给一次注定失败的同步
     /// XPC 买单。
     public var hasInstalledCounterpart: Bool { isPaired && isWatchAppInstalled }
+
+    /// 按"只在会话激活之后才去读那两个属性"的顺序构造对端状况。
+    ///
+    /// # 为什么两个取值是**闭包**而不是布尔
+    ///
+    /// `isPaired` / `isWatchAppInstalled` 只在会话激活之后才有意义（未激活
+    /// 时它们恒为 false），而 `WCSession` 的属性读取属于"要与手表守护进程
+    /// 打交道"的那一类 —— 而调用方是**主 actor**。未激活时读它们等于为一次
+    /// 注定被 `skippedNotActivated` 挡掉的推送白付两遍跨进程代价。
+    ///
+    /// 传布尔值是拦不住这件事的：参数在调用**之前**就求值了，判断写得再
+    /// 对也没用。取值做成闭包之后，"未激活时根本不去读"这句话才有可能被
+    /// 断言到 —— 见 `WatchPushTests.anInactiveSessionNeverReadsTheCounterpartProperties`。
+    public static func current(isSupported: Bool,
+                               isActivated: Bool,
+                               isPaired: () -> Bool,
+                               isWatchAppInstalled: () -> Bool) -> WatchCounterpart {
+        guard isActivated else {
+            return WatchCounterpart(isSupported: isSupported, isActivated: false,
+                                    isPaired: false, isWatchAppInstalled: false)
+        }
+        return WatchCounterpart(isSupported: isSupported, isActivated: true,
+                                isPaired: isPaired(),
+                                isWatchAppInstalled: isWatchAppInstalled())
+    }
 }
 
 /// 一次推送的结论。

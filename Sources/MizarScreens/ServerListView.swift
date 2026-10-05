@@ -8,6 +8,9 @@ struct ServerListView: View {
     @Bindable var model: AppModel
     @Binding var showingAddServer: Bool
     @State private var pendingForget: ServerRecord?
+    /// 列表的**导航**选中项。见 `ServerListSelection` 里那段说明 ——
+    /// 它为什么不能直接用 `model.selectedServerID`。
+    @State private var selection = ServerListSelection()
 
     var body: some View {
         // 选中走 `model.select` 而不是直接写 `model.selectedServerID`。
@@ -21,8 +24,10 @@ struct ServerListView: View {
         //
         // 用 `List(selection:)` 而不是自己写点击手势：iPad 横屏的侧栏
         // 高亮、键盘上下键、VoiceOver 的"已选中"都靠它，自己实现会漏。
-        List(selection: Binding(get: { model.selectedServerID },
-                               set: { if let id = $0 { model.select(id) } })) {
+        List(selection: Binding(get: { selection.value },
+                               set: { newValue in
+                                   if let id = selection.apply(newValue) { model.select(id) }
+                               })) {
             ForEach(model.servers) { server in
                 row(server)
                     .tag(server.id)
@@ -33,6 +38,11 @@ struct ServerListView: View {
                     }
             }
         }
+        // 模型换了当前那一台（冷启动读记录、配对、通知深链、删掉当前这台）
+        // 时把高亮跟过去。方向是**单向**的：`nil` 不回写模型。
+        .onChange(of: model.selectedServerID, initial: true) { _, open in
+            selection.syncFromModel(open)
+        }
         .navigationTitle(tr("服务端", "Servers"))
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
@@ -41,7 +51,10 @@ struct ServerListView: View {
                 }
             }
         }
-        .refreshable { await model.loadServers() }
+        // 下拉刷新是**用户明确**要求重连当前那一台，因此不能被
+        // "这一次前台会话已经连过"那条去重吃掉 —— 那个动作的全部意义
+        // 就是"再试一次"。
+        .refreshable { await model.loadServers(reconnecting: true) }
         .task { await model.loadServers() }
         .confirmationDialog(
             tr("移除这台服务端？", "Remove this server?"),

@@ -124,6 +124,49 @@ struct WatchPushTests {
         #expect(await writer.count == 0)
     }
 
+    /// 会话没激活时，那两个属性**连读都不该读**。
+    ///
+    /// # 为什么这一条不能只靠上面那条
+    ///
+    /// 上面那条把 `isPaired: true` **按值**传进来，等于假设这两个值已经
+    /// 取到了 —— 而取值本身才是代价所在：`WCSession` 的属性读取要与手表
+    /// 守护进程打交道，调用方还是主 actor。一次注定被跳过的推送不该为它
+    /// 付两遍。
+    ///
+    /// 按值传是拦不住的（参数在调用之前就求值了），因此取值是闭包 ——
+    /// 有了闭包，这条测试才观察得到"到底读没读"。
+    @Test func anInactiveSessionNeverReadsTheCounterpartProperties() {
+        var reads = 0
+        let counterpart = WatchCounterpart.current(
+            isSupported: true,
+            isActivated: false,
+            isPaired: { reads += 1; return true },
+            isWatchAppInstalled: { reads += 1; return true })
+
+        #expect(reads == 0, "未激活时不该去读 isPaired / isWatchAppInstalled")
+        #expect(counterpart == WatchCounterpart(isSupported: true, isActivated: false,
+                                               isPaired: false, isWatchAppInstalled: false))
+        #expect(!counterpart.hasInstalledCounterpart)
+    }
+
+    /// 激活之后才真的去读，并且如实反映读到的值。
+    ///
+    /// 少了这一条，上一条可以用"永远不读、一律填 false"通过 ——
+    /// 而那会让同步彻底不工作。
+    @Test func anActiveSessionReadsTheCounterpartProperties() {
+        var reads = 0
+        let counterpart = WatchCounterpart.current(
+            isSupported: true,
+            isActivated: true,
+            isPaired: { reads += 1; return true },
+            isWatchAppInstalled: { reads += 1; return false })
+
+        #expect(reads == 2, "激活之后必须如实去读")
+        #expect(counterpart.isPaired)
+        #expect(!counterpart.isWatchAppInstalled)
+        #expect(!counterpart.hasInstalledCounterpart)
+    }
+
     /// 不支持 WatchConnectivity 的机器上不投递。
     @Test func anUnsupportedDeviceDeliversNothing() async {
         let writer = RecordingWriter()
