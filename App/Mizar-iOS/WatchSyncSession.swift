@@ -25,6 +25,13 @@ final class PhoneWatchSession: NSObject, WCSessionDelegate {
 
     private weak var model: AppModel?
 
+    /// 推送的决策与去重。
+    ///
+    /// 放在这里而不是把判断写在 `push()` 里：那几项判断**必须**能在
+    /// macOS 上被测试覆盖，而本文件属于 Xcode 工程，`swift test` 看不到它。
+    /// 见 `WatchPush` 里关于"模拟器跑不到这条路径"的说明。
+    private let pusher = WatchPush(writer: WCSessionContextWriter())
+
     /// 激活会话并接上模型。
     func activate(model: AppModel) {
         self.model = model
@@ -47,25 +54,41 @@ final class PhoneWatchSession: NSObject, WCSessionDelegate {
         // 应用来碰运气。
         NotificationCenter.default.addObserver(forName: .mizarRequestWatchSync,
                                                 object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in await self?.push() }
+            // `force: true`：这个按钮的全部意义就是"内容没变也要再投一次"，
+            // 因为对端可能是刚装好的。
+            Task { @MainActor in await self?.push(force: true) }
         }
     }
 
     /// 把手表当前的配置同步过去。
-    func push() async {
-        guard let model, WCSession.isSupported() else { return }
+    ///
+    /// # 顺序在这里是有意义的
+    ///
+    /// 判断（支持不支持、激活没有、对端在不在）**全部**发生在碰
+    /// `WCSession` 的投递 API 与取载荷之前：
+    ///
+    ///	对端没装应用时，`updateApplicationContext` 是一座到手表守护进程的
+    ///	同步 XPC，而且注定失败。真机日志里那一串
+    ///	`WCErrorCodeWatchAppNotInstalled` 就是它在主线程上一遍遍等回来的。
+    ///	`isPaired` / `isWatchAppInstalled` 是本地属性，读它们不产生任何
+    ///	跨进程调用 —— 一次注定失败的同步 XPC 因此变成一次属性读取。
+    ///
+    ///	取载荷（`prepareWatchSync`）会给**每台**服务端读一次 Keychain，
+    ///	必要时还要派生一台手表设备（一次网络往返）。对端不在时那些活
+    ///	全是白干的。
+    @discardableResult
+    func push(force: Bool = false) async -> WatchPushDecision {
+        guard WCSession.isSupported() else { return .skippedUnsupported }
         let session = WCSession.default
-        guard session.activationState == .activated else { return }
-        guard let payload = await model.prepareWatchSync() else { return }
-        guard let data = try? payload.encode() else { return }
 
-        do {
-            // 载荷很小（几台服务端的地址与令牌），可以直接放进上下文。
-            try session.updateApplicationContext(["payload": data])
-        } catch {
-            // 对端没装应用时这里会失败，而那不是错误 —— 用户可能只是
-            // 还没在手表上装 Mizar。
-            NSLog("ISC Mizar: 无法同步给手表：\(error.localizedDescription)")
+        return await pusher.push(counterpart: WatchCounterpart(
+            isSupported: true,
+            isActivated: session.activationState == .activated,
+            isPaired: session.isPaired,
+            isWatchAppInstalled: session.isWatchAppInstalled
+        ), force: force) { [model] in
+            guard let payload = await model?.prepareWatchSync() else { return nil }
+            return try? payload.encode()
         }
     }
 
@@ -118,5 +141,58 @@ final class PhoneWatchSession: NSObject, WCSessionDelegate {
     func currentPayload() async -> Data? {
         guard let model, let payload = await model.prepareWatchSync() else { return nil }
         return try? payload.encode()
+    }
+}
+
+/// 把上下文交给 `WCSession` 的那一次调用。
+///
+/// # 为什么它必须离开主线程
+///
+/// `WCSession.updateApplicationContext` 返回的是 `BOOL` + `NSError**`，
+/// 也就是"调用方要等一个结果"——它是一次到手表守护进程的**同步 XPC**。
+/// 真机上日志会打成
+/// `-[WCSession updateApplicationContext:error:]_block_invoke failed due to
+/// WCErrorCodeWatchAppNotInstalled`：失败是从回复块里报出来的，说明这次
+/// 调用确实等到了对端的回答。
+///
+/// 同步 XPC 的代价由**调用方所在的线程**承担。调用方是主 actor 时，
+/// 那段等待就是系统弹「应用未响应」的那几秒。
+///
+/// # 为什么是专用串行队列，而不是 `Task.detached` 或协作线程池
+///
+/// 与 `KeychainTokenStore` 同一个理由（见 `ServerRecord.swift` 里那段
+/// 说明）：这些调用是**阻塞**的，而 Swift 并发的协作线程池只准备了与
+/// 核数相当的线程 —— 用它去承担阻塞会让池里别的任务排不上队。libdispatch
+/// 会为阻塞的工作补线程，这正是它擅长的事。
+///
+/// # 换一条队列调用它是被支持的
+///
+/// `WCSession.h` 在协议那一节写着："All delegate methods will be called on
+/// the same queue. **The delegate queue is a non-main serial queue.** It is the
+/// client's responsibility to dispatch to another queue if necessary." ——
+/// 框架自己就是在一条非主队列上回调的，把"另一条队列"当成调用方要自己
+/// 安排的事。同一份头文件里 `activateSession` 那条注释也说明了为什么
+/// **只有**投递需要挪走、激活不需要："If the WCSessionDelegate
+/// session:activationDidCompleteWithState:error: is implemented this method
+/// becomes an asynchronous call" —— 我们实现了那个方法，因此
+/// `activate()` 是异步的，留在主 actor 上没有代价。
+///
+/// 串行而不是并发：同一时刻只应该有一次投递（`WatchPush` 已经保证了
+/// 这一点，这里再串一层是因为队列本身就该有自己的语义，而不是靠调用方
+/// 自觉）。
+private struct WCSessionContextWriter: WatchContextWriter {
+
+    private static let queue = DispatchQueue(label: "app.isc.mizar.watch-context")
+
+    func deliver(_ payload: Data) async throws {
+        // 与 `KeychainTokenStore.perform` 同构：调用方 await 的是续体，
+        // 而不是阻塞在自己的线程上。
+        try await withCheckedThrowingContinuation { continuation in
+            Self.queue.async {
+                continuation.resume(with: Result {
+                    try WCSession.default.updateApplicationContext(["payload": payload])
+                })
+            }
+        }
     }
 }

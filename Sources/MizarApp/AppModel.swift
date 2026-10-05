@@ -80,15 +80,47 @@ public final class AppModel {
     /// 地址的探测 —— 不取消的话，切服务器就变成了"同时连两台"。
     private var connectTask: Task<Void, Never>?
 
+    /// 正在跑的那一次连接属于哪台服务端（nil = 没有在跑）。
+    ///
+    /// # 它挡的是"一次开屏连三遍"
+    ///
+    /// 冷启动时 `startConnecting` 会被叫三次：应用壳的 `.task`、
+    /// `scenePhase` 变成 `.active`、以及列表页的 `.task`。每一次都会
+    /// `cancel()` 上一个再开一场**全新的候选地址竞速** —— 而一场竞速是
+    /// 八到九条 TCP 连接，被取消的那一场也不会立刻收摊（它要等每条
+    /// URLSession 请求自己注意到取消）。三场叠加起来就是真机日志里
+    /// 那一串 `C2…C14`：一条谁也用不上的连接风暴。
+    ///
+    /// 有了这个标记，同一台服务端在**已经有一条连接在跑**时直接复用，
+    /// 只有用户明确要求（"重试"按钮、切到另一台）才会掐掉重开。
+    private var connectingServerID: String?
+
+    /// 连接批次号。
+    ///
+    /// 用来回答"刚刚跑完的这一场还是不是当前那一场"：被取消的那一场
+    /// 不能去改**新**那一场的状态（把 `.connecting` 抹成 `.idle` 会让
+    /// 界面永远停在骨架屏上）。
+    private var connectBatch = 0
+
     /// 会话轮换计数。
     ///
     /// 切服务器或重新连接时递增，让**在途的**刷新结果作废 —— 否则一次
     /// 慢请求会在切换之后把上一台机器的数据写进当前视图。
     private var generation = 0
 
-    public init(directory: URL? = nil) {
+    /// 构造。
+    ///
+    /// # 为什么令牌存储与传输工厂是参数
+    ///
+    /// 与 `AppModel.probe` 同样的理由：这一层有一半的行为是"什么时候**不**
+    /// 去连"，而那种断言只有在能把网络动作换成假的、把令牌换成内存里那一份
+    /// 之后才写得出来 —— 真 Keychain 要真账号，真网络要真服务端。
+    /// 生产代码走的是两个默认值，与改动前逐字一致。
+    public init(directory: URL? = nil,
+                tokens: TokenStore = KeychainTokenStore(),
+                makeTransport: @escaping TransportFactory = ServerSession.defaultTransport) {
         let root = directory ?? Self.defaultDirectory()
-        self.pool = ServerPool(directory: root)
+        self.pool = ServerPool(directory: root, tokens: tokens, makeTransport: makeTransport)
     }
 
     private static func defaultDirectory() -> URL {
@@ -165,7 +197,8 @@ public final class AppModel {
     /// 现在它只做两件同步的事：把选中项改掉、把状态标成"连接中"
     /// （界面据此**立刻**画出骨架），然后把连接交给后台任务。
     public func select(_ id: String) {
-        if selectedServerID != id {
+        let changed = selectedServerID != id
+        if changed {
             // 在途的刷新结果必须作废：否则一次慢请求会在切换之后
             // 把上一台机器的数据写进当前视图（见 `generation`）。
             generation += 1
@@ -173,31 +206,54 @@ public final class AppModel {
             // 清空上一台的数据：见类型头部关于"可选而不是保留上次值"的说明。
             clearServerData()
         }
-        startConnecting(id)
+        // 只有**换了一台**才掐掉在跑的那一次。
+        //
+        // `List(selection:)` 的 setter 会被系统调用多次（侧栏重新布局、
+        // 键盘上下键、选中项被重新应用），而"重复选中同一台"本身不是
+        // 一次新的意图 —— 每次重开一场竞速的话，光是列表页的绘制就能
+        // 发出好几条连接。
+        startConnecting(id, restart: changed)
     }
 
     /// 开始连接一台服务端，**不阻塞调用方**。
     ///
-    /// `force` 为 false 时，已经连上且数据在手就不重复连：列表页每次
-    /// 刷新、详情页每次重新出现都会走到这里，而每一次重连都是七八条
-    /// 候选地址的探测。
-    private func startConnecting(_ id: String, force: Bool = false) {
+    /// - Parameters:
+    ///   - force: 已经连上且数据在手时也重连（进前台、用户手动重试）。
+    ///   - restart: 已经有一次连接在跑时**掐掉它重开**。只有用户明确的
+    ///     要求（"重试"按钮、切到另一台）才为 true —— 冷启动那三次调用
+    ///     不是三次意图，它们要的是同一件事。
+    private func startConnecting(_ id: String, force: Bool = false, restart: Bool = false) {
         if !force, states[id] == .online, lastRefresh != nil { return }
         // 状态先落到"连接中"：界面据此**立刻**画骨架，
         // 而不是等连接结束才决定显示什么。
         states[id] = .connecting
+
+        // 同一台服务端已经有一条连接在跑：复用它。
+        if !restart, connectingServerID == id { return }
+
         // 一次只连一台：前一个连接还在跑时它已经过时了（用户切走了），
         // 让它继续只会多占一份网络与一份令牌探测。
         connectTask?.cancel()
+        connectingServerID = id
+        connectBatch += 1
+        let batch = connectBatch
         connectTask = Task { [weak self] in
             await self?.connectAndRefresh()
+            // 只有"跑完的这一场仍是当前那一场"才清标记：被取消的那一场
+            // 跑完时不能把**新**那一场的标记抹掉，否则下一次进前台会
+            // 以为没有连接在跑，再开一场。
+            guard let self, self.connectBatch == batch else { return }
+            self.connectingServerID = nil
         }
     }
 
     /// 用户手动重试（"重试"按钮、下拉刷新）。
+    ///
+    /// `restart: true` —— 用户按下它就是因为刚才那一次没有给出他想要的
+    /// 结果，复用一条已经在跑的连接会让这个按钮看起来没反应。
     public func retry() {
         guard let id = selectedServerID else { return }
-        startConnecting(id, force: true)
+        startConnecting(id, force: true, restart: true)
     }
 
     private func clearServerData() {
@@ -287,6 +343,10 @@ public final class AppModel {
     /// 它是**后台任务**的入口（见 `select` 与 `startConnecting`），
     /// 因此不假设调用方在等它，也不假设中途没有被取消。
     public func connectAndRefresh() async {
+        // 进场时把批次号记下来：下面那个 `defer` 要判断"跑完的这一场
+        // 还是不是当前那一场"（见 `connectBatch`）。
+        let batch = connectBatch
+
         // 冷启动时应用壳的 `.task` 与列表页的 `.task` 是并发跑的：
         // 读过记录不代表已经有人填过 `selectedServerID`。少了这一段，
         // 冷启动有一半的概率什么都不连 —— 界面上是四个空页签。
@@ -300,7 +360,11 @@ public final class AppModel {
         states[id] = .connecting
         // "连接中"不能是终态：被取消（用户切走了）时如果不落一个确定的
         // 状态，界面会永远停在骨架屏上，连"重试"都出不来。
-        defer { if states[id] == .connecting { states[id] = .idle } }
+        //
+        // 只在"自己仍是当前那一场"时落：被取消的那一场跑完时，新那一场
+        // 可能已经开始了，而它刚把状态置成 `.connecting` —— 抹成 `.idle`
+        // 会让骨架屏卡在那里不动。
+        defer { if connectBatch == batch, states[id] == .connecting { states[id] = .idle } }
 
         do {
             let state = try await pool.connect(id: id)
@@ -612,6 +676,14 @@ public final class AppModel {
     ///
     /// `force`：从后台回来时必须重新连一次（长轮询已经停了，手上的
     /// 快照也可能已经过期），因此这里刻意不走"已经连上就跳过"的捷径。
+    ///
+    /// # 为什么**不**是 `restart`
+    ///
+    /// 冷启动时它会被叫两次：应用壳的 `.task` 一次，`scenePhase` 变成
+    /// `.active` 一次（`.task` 跑起来的时候那一次还没到）。两次都掐掉
+    /// 重开的话，第一场竞速刚发出去的八条连接会被丢掉重发一遍 ——
+    /// 而两次要的是同一件事，没有理由为它付两遍代价。
+    /// 真正需要"掐掉重来"的是用户按下重试，见 `retry()`。
     public func enterForeground() async {
         if servers.isEmpty {
             servers = await pool.records()
