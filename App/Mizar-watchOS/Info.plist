@@ -12,8 +12,10 @@
 <key>WKCompanionAppBundleIdentifier</key><string>app.isc.mizar</string>
 <key>CFBundleDevelopmentRegion</key><string>en</string>
 <key>CFBundleLocalizations</key><array><string>en</string><string>zh-Hans</string></array>
+<!-- 本地网络：手表在**同一局域网内**直连服务端时，watchOS 要求这个
+     权限。走公网地址时不经过它 —— 这句只说局域网那一条路。 -->
 <key>NSLocalNetworkUsageDescription</key>
-<string>连接同一局域网内的 Phecda 服务端以查看状态。</string>
+<string>在局域网内直连你的 Phecda 服务端以查看状态。</string>
 <key>NSBonjourServices</key><array>
   <string>_isc._tcp</string>
 </array>

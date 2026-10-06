@@ -20,10 +20,12 @@
 <!-- 相机：扫码配对。描述会显示在权限弹窗上。 -->
 <key>NSCameraUsageDescription</key>
 <string>扫描 Phecda 上的配对二维码，用于连接你的服务端。</string>
-<!-- 本地网络：手机要连的是局域网里的那台机器。没有这一条，
-     iOS 会在第一次请求时静默失败（而错误信息完全不指向权限）。 -->
+<!-- 本地网络：手机在**同一局域网内**直连服务端时，iOS 要求这个权限。
+     没有这一条，第一次请求会静默失败（而错误信息完全不指向权限）。
+     走公网地址（服务端的公网域名 / IPv6）时不经过这个权限 —— 所以
+     这句说明只讲局域网那一条路，不代表 Mizar 只能用局域网。 -->
 <key>NSLocalNetworkUsageDescription</key>
-<string>连接同一局域网内的 Phecda 服务端以查看状态与资源占用。</string>
+<string>在局域网内直连你的 Phecda 服务端以查看状态与资源占用。</string>
 <key>NSBonjourServices</key><array>
   <string>_isc._tcp</string>
 </array>
