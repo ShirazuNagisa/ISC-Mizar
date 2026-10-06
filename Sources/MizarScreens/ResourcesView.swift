@@ -35,6 +35,7 @@ struct ResourcesView: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 } else {
+                    footprintSection
                     hostSection
                 }
 
@@ -52,9 +53,61 @@ struct ResourcesView: View {
         }
     }
 
+    /// 这套东西自己的占用。
+    ///
+    /// 放在"整机"前面：用户打开资源页时想知道的通常是"我的服务占了
+    /// 多少"，而整机数字是用来对照的（机器忙到底是它还是别人）。
+    @ViewBuilder private var footprintSection: some View {
+        Section(tr("内核 + 站点", "Kernel + sites")) {
+            if let footprint = model.metrics?.footprint {
+                VStack(alignment: .leading, spacing: 6) {
+                    InfoRow(label: "CPU", value: footprint.cpuPercent.formattedPercentValue)
+                    ProgressBar(fraction: footprint.cpuFraction).frame(height: 5)
+                    // 多核机器上 CPU 之和会超过 100%：写清楚它算的是几个核，
+                    // 否则"180%"看起来像个 bug。
+                    if footprint.cpuPercent > 100 {
+                        Text(tr("各进程之和，\(footprint.processes) 个进程；超过 100% 即多于一个核。",
+                                "Sum over \(footprint.processes) processes; above 100% means more than one core."))
+                            .font(.caption2).foregroundStyle(.tertiary)
+                    } else {
+                        Text(tr("\(footprint.processes) 个进程", "\(footprint.processes) processes"))
+                            .font(.caption2).foregroundStyle(.tertiary)
+                    }
+                }
+                InfoRow(label: tr("内存", "Memory"), value: footprint.memoryBytes.formattedBytes)
+                networkRows(footprint)
+            } else {
+                // 旧内核不发 footprint。说清楚是"内核版本"而不是"没有占用"。
+                Text(tr("这台服务器的内核还不支持这个口径，升级内核后可见。",
+                        "This server's kernel does not report this breakdown yet."))
+                    .font(.callout).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    /// 网络的三态。
+    ///
+    /// "没读到"必须说成没读到，不能显示成 0 —— 后者会被读成"它不占网络"，
+    /// 而那是一个会被用户当成结论的假事实。
+    @ViewBuilder private func networkRows(_ footprint: FootprintMetrics) -> some View {
+        if footprint.hasNetwork {
+            InfoRow(label: tr("下载", "Download"),
+                    value: (footprint.netRxBytesPerSec ?? 0).formattedRate)
+            InfoRow(label: tr("上传", "Upload"),
+                    value: (footprint.netTxBytesPerSec ?? 0).formattedRate)
+            Text(tr("采样方式：\(footprint.netBackend)", "Sampled via \(footprint.netBackend)"))
+                .font(.caption2).foregroundStyle(.tertiary)
+        } else {
+            InfoRow(label: tr("网络", "Network"), value: footprint.netBackend == "unsupported"
+                    ? tr("不支持按进程统计", "Not supported here")
+                    : tr("本次未读到", "No reading this time"))
+        }
+    }
+
     @ViewBuilder private var hostSection: some View {
         let host = model.metrics?.host
-        Section(tr("主机", "Host")) {
+        Section(tr("整机", "Whole machine")) {
             VStack(alignment: .leading, spacing: 6) {
                 InfoRow(label: "CPU", value: host.map { $0.cpuPercent.formattedPercentValue } ?? "—")
                 ProgressBar(fraction: (host?.cpuPercent ?? 0) / 100)
@@ -237,7 +290,7 @@ struct DNSView: View {
                 .buttonStyle(.plain)
             }
 
-            if let credential = selectedCredential, !zones.isEmpty {
+            if selectedCredential != nil, !zones.isEmpty {
                 Picker(tr("区域", "Zone"), selection: $selectedZone) {
                     Text(tr("请选择", "Select")).tag(DNSZone?.none)
                     ForEach(zones) { zone in

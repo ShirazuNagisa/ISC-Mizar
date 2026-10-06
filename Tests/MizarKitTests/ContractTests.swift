@@ -254,3 +254,55 @@ private let validPayload = #"""
     let payload = try PairingPayload.parse(expired)
     #expect(payload.expired())
 }
+
+// MARK: - footprint（内核 0.4.1）
+
+/// 网络的三态必须能分辨。
+///
+/// 这是这条测试真正守的东西：如果速率用一个非可选的 0 表示，"这台服务器
+/// 没有进程级网络采样"和"它现在不占网络"就分不开了，界面只能二选一地猜，
+/// 而猜错的那一半会让用户得出相反的结论。
+@Test func footprintDecodingKeepsTheThreeNetworkStatesApart() throws {
+    let live = """
+    {"host":{"cpu_percent":10,"memory_used_bytes":1,"memory_total_bytes":2,
+             "net_rx_bytes_per_sec":3,"net_tx_bytes_per_sec":4,"backend":"darwin"},
+     "footprint":{"cpu_percent":180,"memory_bytes":4096,"net_rx_bytes_per_sec":1024,
+                  "net_tx_bytes_per_sec":512,"net_backend":"darwin-nettop","processes":3},
+     "apps":[]}
+    """
+    let snapshot = try JSONDecoder.mizar.decode(MetricsSnapshot.self, from: Data(live.utf8))
+    let footprint = try #require(snapshot.footprint)
+    #expect(footprint.hasNetwork)
+    #expect(footprint.netRxBytesPerSec == 1024)
+    #expect(footprint.netBackend == "darwin-nettop")
+    #expect(footprint.processes == 3)
+    // 多核机器上 CPU 之和会超过 100%：进度条必须钳住，否则画到框外。
+    #expect(footprint.cpuFraction == 1.0)
+}
+
+@Test func footprintDecodingTreatsAnAbsentRateAsUnreadNotZero() throws {
+    let json = """
+    {"host":{"cpu_percent":1,"memory_used_bytes":1,"memory_total_bytes":2,
+             "net_rx_bytes_per_sec":0,"net_tx_bytes_per_sec":0,"backend":"linux-procfs"},
+     "footprint":{"cpu_percent":0,"memory_bytes":0,"net_backend":"unsupported","processes":1},
+     "apps":[]}
+    """
+    let snapshot = try JSONDecoder.mizar.decode(MetricsSnapshot.self, from: Data(json.utf8))
+    let footprint = try #require(snapshot.footprint)
+    #expect(footprint.hasNetwork == false)
+    #expect(footprint.netRxBytesPerSec == nil)
+    #expect(footprint.netBackend == "unsupported")
+}
+
+/// 旧内核（0.4.0 之前）不发 footprint，老服务器不能让界面解析失败 ——
+/// 否则用户升级手机端之后，连接一台没升级的服务器会看到空白页。
+@Test func metricsWithoutFootprintStillDecode() throws {
+    let json = """
+    {"host":{"cpu_percent":1,"memory_used_bytes":1,"memory_total_bytes":2,
+             "net_rx_bytes_per_sec":0,"net_tx_bytes_per_sec":0,"backend":"darwin"},
+     "apps":[]}
+    """
+    let snapshot = try JSONDecoder.mizar.decode(MetricsSnapshot.self, from: Data(json.utf8))
+    #expect(snapshot.footprint == nil)
+    #expect(snapshot.host.cpuPercent == 1)
+}

@@ -124,6 +124,8 @@ public struct ImplState: Decodable, Sendable {
 
 public struct MetricsSnapshot: Decodable, Sendable {
     public let host: HostMetrics
+    /// 内核自身 + 站点的合计占用。旧内核不发这个字段，因此可选。
+    public let footprint: FootprintMetrics?
     public let apps: [AppMetrics]
     public let history: [HostMetrics]?
 }
@@ -175,6 +177,41 @@ public struct GpuMetrics: Decodable, Sendable {
     public let utilizationPercent: Double?
 
     public var isSupported: Bool { backend != "unsupported" }
+}
+
+/// **内核自己 + 它托管的站点**的合计占用。
+///
+/// # 为什么手机端也要区分它和 HostMetrics
+///
+/// `HostMetrics` 是那台服务器整机的占用，这个是"上面跑的这套东西占了多少"。
+/// 手机上看一眼就知道"服务器卡是不是因为这边的站点"，不必让用户自己去减。
+///
+/// # 三条读法上的边界（定义在 Core 的 D39）
+///
+///   - 含站点的**进程树**：预设里的 `npm start` 会再 fork 出 node；
+///   - `memoryBytes` 是各进程 RSS 之和，是一个上界；
+///   - `cpuPercent` 是各进程之和，**可能超过 100**（每个进程的 100% 指
+///     "一个核跑满"），画进度条前必须钳到 0...1。
+///
+/// GPU 不在里面：macOS 没有按进程归因 GPU 的途径，看 `HostMetrics.gpu`。
+public struct FootprintMetrics: Decodable, Sendable {
+    public let at: Date?
+    public let cpuPercent: Double
+    public let memoryBytes: Int
+    /// 仅在 `netBackend` 是后端名时才有值 —— 另外两种状态（不支持 /
+    /// 没读到）下内核**不发**这两个字段，界面据此显示"—"而不是 0。
+    public let netRxBytesPerSec: Double?
+    public let netTxBytesPerSec: Double?
+    /// 网络数字的来源，三态：后端名 / `unsupported` / `unavailable`。
+    /// 三者必须分开显示：把"没读到"说成 0 会让用户以为它不占网络。
+    public let netBackend: String
+    /// 参与合计的进程数。
+    public let processes: Int
+
+    public var hasNetwork: Bool { netRxBytesPerSec != nil && netTxBytesPerSec != nil }
+
+    /// 进度条用的占比。多核机器上 CPU 之和会超过 100%，不钳会画到框外。
+    public var cpuFraction: Double { min(1, max(0, cpuPercent / 100)) }
 }
 
 public struct AppMetrics: Decodable, Sendable, Identifiable {

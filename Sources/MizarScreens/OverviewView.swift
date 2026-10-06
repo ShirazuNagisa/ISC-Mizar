@@ -50,41 +50,73 @@ struct OverviewView: View {
         .refreshable { await model.refreshAll(); await model.refreshMetrics() }
     }
 
+    /// 四张卡：CPU / GPU 一行，内存 / 网络 一行（自适应网格，窄屏自动换行）。
+    ///
+    /// # 口径
+    ///
+    /// CPU / 内存 / 网络 是**那台服务器上这套东西自己的占用**（内核 + 站点
+    /// 进程树），不是整机。GPU 是唯一保留设备级口径的 —— macOS 没有按进程
+    /// 归因 GPU 的途径 —— 因此它的值下面明确写着"整机 GPU"。
+    ///
+    /// 两种口径并排摆着而不说明，用户会把设备级的 56% 读成"这套东西吃了
+    /// 56% GPU"，而那正是 footprint 这个口径要消灭的误导。
     private var metricsRow: some View {
         let host = model.metrics?.host
+        let footprint = model.metrics?.footprint
         return LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 12)], spacing: 12) {
             MetricCard(
                 title: tr("CPU", "CPU"),
-                value: host.map { $0.cpuPercent.formattedPercentValue } ?? "—",
-                detail: .fraction((host?.cpuPercent ?? 0) / 100),
+                value: footprint.map { $0.cpuPercent.formattedPercentValue } ?? "—",
+                detail: .fraction(footprint?.cpuFraction ?? 0),
                 symbol: "cpu",
-                unsupported: host?.metricsUnsupported == true ? tr("此平台不支持", "Not supported here") : nil)
-
-            MetricCard(
-                title: tr("内存", "Memory"),
-                value: host.map { $0.memoryUsedBytes.formattedBytes } ?? "—",
-                detail: .text(host.map { "\($0.memoryUsedBytes.formattedBytes) / \($0.memoryTotalBytes.formattedBytes)" } ?? ""),
-                symbol: "memorychip",
-                tint: .purple,
-                unsupported: host?.metricsUnsupported == true ? tr("此平台不支持", "Not supported here") : nil)
-
-            MetricCard(
-                title: tr("网络", "Network"),
-                value: host.map { $0.netRxBytesPerSec.formattedRate } ?? "—",
-                detail: .text(host.map { "↑ \($0.netTxBytesPerSec.formattedRate)" } ?? ""),
-                symbol: "network",
-                tint: .teal,
-                unsupported: host?.metricsUnsupported == true ? tr("此平台不支持", "Not supported here") : nil)
+                unsupported: footprint == nil ? tr("这台内核还不支持", "This kernel is too old") : nil)
 
             MetricCard(
                 title: tr("GPU", "GPU"),
                 value: model.metrics?.host.gpu?.utilizationPercent.map { $0.formattedPercentValue } ?? "—",
-                detail: .text(model.metrics?.host.gpu?.name ?? ""),
+                detail: .text(gpuDetail),
                 symbol: "cube.transparent",
                 tint: .orange,
                 // 三态：没有 GPU 字段 = 这台机器没有可采样的 GPU；
                 // `unsupported` = 这个平台还没实现。两者都不能显示成 0%。
                 unsupported: gpuUnsupported)
+
+            MetricCard(
+                title: tr("内存", "Memory"),
+                value: footprint.map { $0.memoryBytes.formattedBytes } ?? "—",
+                detail: .text(host.map { tr("整机 \($0.memoryUsedBytes.formattedBytes) / \($0.memoryTotalBytes.formattedBytes)",
+                                            "device \($0.memoryUsedBytes.formattedBytes) / \($0.memoryTotalBytes.formattedBytes)") } ?? ""),
+                symbol: "memorychip",
+                tint: .purple,
+                unsupported: footprint == nil ? tr("这台内核还不支持", "This kernel is too old") : nil)
+
+            MetricCard(
+                title: tr("网络", "Network"),
+                value: footprint?.netRxBytesPerSec.map { $0.formattedRate } ?? "—",
+                detail: .text(footprint?.netTxBytesPerSec.map { "↑ \($0.formattedRate)" } ?? tr("这套东西的流量", "traffic of this stack")),
+                symbol: "network",
+                tint: .teal,
+                unsupported: networkUnsupported)
+        }
+    }
+
+    /// GPU 值下面那一行：是设备级的，所以写"整机"。
+    private var gpuDetail: String {
+        guard let gpu = model.metrics?.host.gpu else { return "" }
+        let name = gpu.name ?? "GPU"
+        return tr("整机 · \(name)", "device · \(name)")
+    }
+
+    /// 网络的三态与 GPU 同构：没读到就是没读到，不能显示成 0。
+    private var networkUnsupported: String? {
+        guard let footprint = model.metrics?.footprint else {
+            return tr("这台内核还不支持", "This kernel is too old")
+        }
+        if footprint.hasNetwork { return nil }
+        switch footprint.netBackend {
+        case "unsupported": return tr("此平台不支持按进程统计", "No per-process sampling here")
+        case "unavailable": return tr("本次未读到", "No reading this time")
+        default: return tr("本次未读到", "No reading this time")
         }
     }
 
