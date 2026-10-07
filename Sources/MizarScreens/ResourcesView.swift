@@ -254,6 +254,41 @@ struct DNSView: View {
             }
         }
         .refreshable { await model.refreshAll() }
+        #if MIZAR_DEMO
+        // 演示模式：自动选中第一个凭据与它的第一个区域。
+        //
+        // # 为什么需要这一句
+        //
+        // 记录那一段只有**先点一下凭据**才会去拉（`select` 里那两条带参数的
+        // 请求）。而演示的验收要求是"DNS 页有记录与任务"，审核员并不知道要
+        // 点凭据 —— 他打开这一页看到的是一条凭据加一条动态解析任务，
+        // 恰好缺了这一页最该展示的东西。
+        //
+        // `task(id:)` 的 id 是凭据数量：这一页出现时全量刷新可能还在路上，
+        // 那时凭据是空的；等它变成 1 时这个 task 会**再跑一次**。
+        // 用 `hasLoadedData` 之类的标志去轮询不如让 SwiftUI 自己通知。
+        //
+        // 选中区域之后**显式**拉一次记录，而不是等 `.onChange(of:)` 那条路。
+        //
+        // 一开始写的就是"只设 selectedZone，让 onChange 去拉"——那样更省事，
+        // 也确实复用了既有路径。但实测下来记录那一段是空的（截图上写着
+        // "这个区域里没有记录"）：视图刚出现时 `Picker` 会把它自己的选择
+        // 写回一次，那一次写回与这里的赋值撞在一起，onChange 不一定按预期
+        // 触发。演示的验收要的是"打开就有记录"，因此这里不做那个假设 ——
+        // `reloadRecords()` 是幂等的，多一次请求换一个确定的画面。
+        //
+        // 放在视图里而不是模型里：被预选的是**这个视图自己的**状态
+        // （`selectedCredential` / `selectedZone`），模型看不见它们，
+        // 也没有理由看见。生产构建里这几行不存在。
+        .task(id: model.credentials.count) {
+            guard selectedCredential == nil, let credential = model.credentials.first else { return }
+            await select(credential)
+            if selectedZone == nil, let zone = zones.first {
+                selectedZone = zone
+                await reloadRecords()
+            }
+        }
+        #endif
         .sheet(isPresented: $creating) {
             RecordFormView(model: model, credential: selectedCredential, zone: selectedZone,
                            record: nil) { await reloadRecords() }
@@ -328,7 +363,11 @@ struct DNSView: View {
                                 .lineLimit(1)
                             Spacer(minLength: 0)
                             if let ttl = record.ttl {
-                                Text("TTL \(ttl)").font(.caption2).foregroundStyle(.tertiary)
+                                // `Text(verbatim:)`：与概览页那个端口同一个理由
+                                // —— `Text("TTL \(ttl)")` 走 LocalizedStringKey，
+                                // 3600 会变成 "3,600"，而在把逗号当小数点的语言里
+                                // 那句话读起来是"TTL 3.6 秒"。
+                                Text(verbatim: "TTL \(ttl)").font(.caption2).foregroundStyle(.tertiary)
                             }
                         }
                         Text(record.content)

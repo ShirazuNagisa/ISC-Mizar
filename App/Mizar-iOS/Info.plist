@@ -8,6 +8,12 @@
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>0.2.1</string>
 <key>CFBundleVersion</key><string>1</string>
+<!-- 出口合规：本应用不使用**非豁免**的加密。
+     它用到的只有 HTTPS（URLSession 提供的标准 TLS）与 Keychain ——
+     两者都在豁免范围内（TLS 是"标准加密"，Keychain 是操作系统服务，
+     不涉及自研或非标准密码学）。少了这一条，每次上传 TestFlight 都会
+     被问一遍"你的应用用了加密吗"，而答案永远是同一个。 -->
+<key>ITSAppUsesNonExemptEncryption</key><false/>
 <key>LSRequiresIPhoneOS</key><true/>
 <key>UILaunchScreen</key><dict/>
 <key>UISupportedInterfaceOrientations</key><array>

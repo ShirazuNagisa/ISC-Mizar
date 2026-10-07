@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- `-exportArchive` 的选项。
+
+	     method = app-store-connect：这是 Xcode 16 起对 App Store 那一条
+	     路径的取值（更早的写法是 `app-store`，在 Xcode 16+ 会被拒绝并提示
+	     改用 `app-store-connect`）。它产出的是要交给 App Store Connect 的
+	     包（若是上传到 TestFlight / App Store，Xcode 会在这里做校验）。
+
+	     这些选项**只在 `--export` 时才被读到**：默认那一遍只 archive，
+	     不导出（见 Scripts/archive.sh 的说明）。 -->
+	<key>method</key>
+	<string>app-store-connect</string>
+
+	<!-- 导出成一个目录，而不是直接上传。上传这一步需要 Apple 账号凭据，
+	     而那一步是人的动作，不是脚本的默认副作用。 -->
+	<key>destination</key>
+	<string>export</string>
+
+	<!-- 自动签名：与工程里的 CODE_SIGN_STYLE = Automatic 一致。
+	     手动签名需要在这里列出一份 provisioning profile 的 UUID 映射，
+	     而那份映射会随着证书续期而过期 —— 一份会过期的配置比没有配置更糟。 -->
+	<key>signingStyle</key>
+	<string>automatic</string>
+	<key>teamID</key>
+	<string>5Q2A46685M</string>
+
+	<!-- 带上 dSYM 并剥掉 Swift 符号：崩溃报告在 App Store Connect 里
+	     要能符号化，而符号表本身没必要留在包里。 -->
+	<key>uploadSymbols</key>
+	<true/>
+	<key>stripSwiftSymbols</key>
+	<true/>
+
+	<!-- 版本号由仓库自己管（Sources/MizarKit/Version.swift 是唯一事实
+	     来源，两个 Info.plist 与它对齐，由 Scripts/test.sh 断言）。
+	     交给 Xcode 管的话，导出的包里的版本会与仓库里那一份不一致 ——
+	     而那个偏差直到 App Store 上架信息对不上才会被发现。 -->
+	<key>manageAppVersionAndBuildNumber</key>
+	<false/>
+</dict>
+</plist>

@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- 手表应用自己的隐私清单。
+
+	     手表是**独立的包**（ISC Mizar Watch.app 嵌在手机的 Watch/ 目录里），
+	     因此它要有一份自己的清单，而不是靠手机那一份覆盖。
+
+	     与手机同样的理由：Mizar-watchOS/ 是同步文件夹，本文件会自动
+	     作为资源进包；membershipExceptions 里只有 Info.plist。 -->
+
+	<key>NSPrivacyTracking</key>
+	<false/>
+	<key>NSPrivacyTrackingDomains</key>
+	<array/>
+
+	<!-- 不收集任何数据：手表上连配对都没有（无摄像头、无键盘），
+	     配置全部由手机同步过来，而同步走的是 WatchConnectivity，
+	     不经过我们的服务器。 -->
+	<key>NSPrivacyCollectedDataTypes</key>
+	<array/>
+
+	<!-- 手表这一份与手机**故意长得一样**，尽管当前的手表二进制里
+	     查不到 NSUserDefaults 符号（nm 确认过：@AppStorage 只在手机的
+	     ISCMizarApp.swift 里）。
+
+	     取舍：多声明一类"当前没用到的"API 不会被拒；少声明一类
+	     **正在用**的会被拒（ITMS-91053）。而手表与手机共享 MizarApp /
+	     MizarKit / MizarUI 三个模块 —— 在共享层里加一个 @AppStorage，
+	     两个包会同时开始用它，而那时最容易漏改的正是这一份。
+	     这个不对称（漏报有代价、多报没有）是这里选择保守的原因。 -->
+	<key>NSPrivacyAccessedAPITypes</key>
+	<array>
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryUserDefaults</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<!-- CA92.1：读写本应用自己的偏好设置。 -->
+				<string>CA92.1</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

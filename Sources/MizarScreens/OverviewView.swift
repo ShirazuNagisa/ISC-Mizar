@@ -140,7 +140,14 @@ struct OverviewView: View {
                         Text(domains.map(\.name).joined(separator: ", "))
                             .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                     } else {
-                        Text(":\(app.localPort)")
+                        // `Text(verbatim:)` 而不是 `Text(":\(app.localPort)")`。
+                        //
+                        // 后者走的是 `LocalizedStringKey` 那条重载，而它的
+                        // 整数插值会按当前语言环境加**千位分隔符** ——
+                        // 端口 3001 于是显示成 ":3,001"，8080 显示成 ":8,080"。
+                        // 那不是一个排版细节：端口是一个会被照着输入的标识符，
+                        // 而 "3,001" 谁也不认识。
+                        Text(verbatim: ":\(app.localPort)")
                             .font(.system(.caption, design: .monospaced))
                             .foregroundStyle(.tertiary)
                     }

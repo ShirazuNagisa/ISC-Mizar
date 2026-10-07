@@ -52,6 +52,17 @@ struct WatchRootView: View {
     private var serverList: some View {
         NavigationStack {
             List {
+                // 演示构建里这里是"演示数据"那一行；生产构建里是空视图
+                // （`EmptyView` 在 List 里不占一行）。
+                //
+                // 判据放在 MizarUI 的 `DemoBadge` 里而不是这里：这个文件
+                // 属于 Xcode 工程，拿不到 `MIZAR_DEMO` 这个编译条件
+                // （它由 Package.swift 只装在包的 target 上）。
+                //
+                // 手表为什么也需要这一行：它链接的是同一个 MizarApp，演示
+                // 构建里 `AppModel()` 给出的是同一份演示数据 —— 没有这一行，
+                // 手表上那台"已连接"的服务器看起来完全是真的。
+                DemoBadge()
                 ForEach(model.servers) { server in
                     NavigationLink {
                         WatchOverviewView(model: model, server: server)

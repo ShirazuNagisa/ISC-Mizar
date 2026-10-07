@@ -1,5 +1,43 @@
 // swift-tools-version: 6.4
 import PackageDescription
+// 清单里要读环境变量（见下面的 MIZAR_DEMO）：tools-version 6 起 Foundation
+// 不再随 PackageDescription 一起进来，因此这一行是必需的。
+import Foundation
+
+// ---- 演示模式：一个**编译期**开关 ----------------------------------------
+//
+// # 为什么是编译期而不是运行时
+//
+// 运行时开关意味着假数据、假站点、假 DNS 记录这些代码与字符串**都会进
+// 生产包**。两个后果都是不可接受的：审核员可能在设置里翻到它，而更糟的
+// 是"看起来正常、其实在显示假数据"——这个应用存在的全部价值就是那几行
+// 数字**是真的**。
+//
+// 编译期开关让 #if MIZAR_DEMO 之外的一切在生产构建里根本不存在，
+// 而这一点是可以验证的：`nm`/`strings` 在生产二进制里搜不到演示数据的
+// 标志性字符串（见 Scripts/archive.sh 里的那一步）。
+//
+// # 为什么用环境变量来驱动，而不是写死
+//
+// 写死一个 `.define("MIZAR_DEMO")` 就等于演示模式永远开着；而"发版前记得
+// 把它注释掉"是那种一定会忘的约定。反过来，写死成"注释掉"则演示模式无法
+// 构建。因此它必须是一个**外部**输入：
+//
+//	MIZAR_DEMO=1 swift build          # 演示构建
+//	MIZAR_DEMO=1 ./Scripts/build-ios.sh
+//	./Scripts/archive.sh              # 归档脚本里显式 unset（见该脚本）
+//
+// 危险方向只有一个：开发者终端里 export 过 MIZAR_DEMO=1，然后直接跑归档。
+// 那个方向由 archive.sh 兜底——它先 unset，再在产物里验一遍"没有演示
+// 字符串"，验不过就失败。
+let demoMode = ProcessInfo.processInfo.environment["MIZAR_DEMO"] == "1"
+
+/// 演示构建才带上的编译条件。
+///
+/// 只装在 MizarApp（数据入口与假内核）与 MizarScreens（"演示数据"横幅）：
+/// MizarKit 不装 —— 假内核只是**实现**了它的 `KernelTransport` 协议，
+/// 协议本身不需要知道演示模式的存在。
+let demoSettings: [SwiftSetting] = demoMode ? [.define("MIZAR_DEMO")] : []
 
 // ISC Mizar —— Phecda 服务端的移动端客户端（iOS / iPadOS / watchOS）。
 //
@@ -37,7 +75,7 @@ let package = Package(
             swiftSettings: [
                 .defaultIsolation(MainActor.self),
                 .enableUpcomingFeature("NonisolatedNonsendingByDefault"),
-            ]
+            ] + demoSettings
         ),
         // 应用层：状态机。
         //
@@ -59,7 +97,7 @@ let package = Package(
             swiftSettings: [
                 .defaultIsolation(MainActor.self),
                 .enableUpcomingFeature("NonisolatedNonsendingByDefault"),
-            ]
+            ] + demoSettings
         ),
         // 屏幕：只在 iOS / iPadOS 上编译。
         //
@@ -78,9 +116,10 @@ let package = Package(
             swiftSettings: [
                 .defaultIsolation(MainActor.self),
                 .enableUpcomingFeature("NonisolatedNonsendingByDefault"),
-            ]
+            ] + demoSettings
         ),
-        .testTarget(name: "MizarKitTests", dependencies: ["MizarKit", "MizarApp"]),
+        .testTarget(name: "MizarKitTests", dependencies: ["MizarKit", "MizarApp"],
+                    swiftSettings: demoSettings),
         // 验收工具：对着**真实内核**跑一遍配对与连接。
         //
         // 它不是产品的一部分（因此没有对应的 product），存在的理由只有一个：

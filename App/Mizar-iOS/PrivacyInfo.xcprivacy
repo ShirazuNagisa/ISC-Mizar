@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- 隐私清单。App Store 自 2024 年春季起强制要求；缺失会在上传阶段
+	     被拒（ITMS-91053 那一类），而不是在审核阶段。
+
+	     放在 Mizar-iOS/ 目录下即可进包：这是个 Xcode 的「同步文件夹」，
+	     目录内容默认全部收进 target，而 membershipExceptions 只排除了
+	     Info.plist 与 Mizar.entitlements（这两个不该当资源）。
+	     清单必须**作为资源**进包，因此它不能被加进那个排除表。 -->
+
+	<!-- 不做任何跨 App 的跟踪：没有广告 SDK，没有归因，没有分析。
+	     false 时下面那个 domains 列表必须是空的。 -->
+	<key>NSPrivacyTracking</key>
+	<false/>
+	<key>NSPrivacyTrackingDomains</key>
+	<array/>
+
+	<!-- 不收集任何数据。
+	     这个应用只连**用户自己的**服务端，没有我们的服务器、没有分析、
+	     没有广告，也没有账号；连配对码都不经过第三方。
+	     空数组是一个明确的声明（"我们不收集"），与"忘了填"不是一回事。 -->
+	<key>NSPrivacyCollectedDataTypes</key>
+	<array/>
+
+	<!-- 需要声明理由的 API。
+
+	     这里只列**实际用到**的那一类，其余三类经 grep 与二进制符号双重
+	     确认未使用：
+	       - FileTimestamp（文件时间戳）：无 creationDate/attributesOfItem 调用
+	       - DiskSpace（磁盘空间）：无 volumeAvailableCapacity 调用
+	       - SystemBootTime（系统启动时间）：无 systemUptime 调用
+	     本应用对文件系统的全部操作是"在自己的应用支持目录里建目录、
+	     写一个 JSON"，不碰时间戳，也不查剩余空间。 -->
+	<key>NSPrivacyAccessedAPITypes</key>
+	<array>
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryUserDefaults</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<!-- CA92.1：读写**本应用自己**的偏好设置。
+				     用到的是 ISCMizarApp.swift 里的
+				     `@AppStorage(PermissionOnboarding.completedKey)`
+				     ——首启权限引导走没走过的那一个标记。
+				     二进制里能查到它（SwiftUI.AppStorage 的构造符号），
+				     因此这一条不是照抄模板。 -->
+				<string>CA92.1</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

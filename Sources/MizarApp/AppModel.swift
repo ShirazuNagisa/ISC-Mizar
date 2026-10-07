@@ -51,6 +51,24 @@ public final class AppModel {
 
     // MARK: 界面状态
 
+    /// 这次构建是不是演示构建。
+    ///
+    /// 它是一个**编译期常量**：生产构建里 `false` 是编译器写死的。
+    /// 界面那条"演示数据"横幅并没有依赖它 —— 横幅整段都在
+    /// `#if MIZAR_DEMO` 里（见 `RootView`）。两层是有意的：单靠一个布尔值，
+    /// Debug 下的优化器不保证把那段视图摇掉，而"演示横幅出现在生产包里"
+    /// 是这个项目最不能接受的一种事故。
+    ///
+    /// 它存在的理由是**测试**：演示测试要能断言"这次构建确实开着演示模式"，
+    /// 否则一个忘了带 `MIZAR_DEMO` 的运行会安静地跳过全部演示断言。
+    public var isDemo: Bool {
+        #if MIZAR_DEMO
+        true
+        #else
+        false
+        #endif
+    }
+
     public var errorMessage: String?
     public var notice: String?
     public var isBusy = false
@@ -166,11 +184,38 @@ public final class AppModel {
     /// 去连"，而那种断言只有在能把网络动作换成假的、把令牌换成内存里那一份
     /// 之后才写得出来 —— 真 Keychain 要真账号，真网络要真服务端。
     /// 生产代码走的是两个默认值，与改动前逐字一致。
+    ///
+    /// # 三个参数为什么是"可选的"而不是"有默认值"
+    ///
+    /// 因为演示模式（见 `DemoMode.swift`）要把这三个**默认值一起**换掉，
+    /// 而函数类型没有"等于"可比 —— 分不出调用方是没传还是传了一个恰好
+    /// 一样的东西。写成可选之后 `nil` 就精确地表示"没传"：应用壳那句
+    /// `AppModel()` 拿到演示数据，而测试里那些显式传参的调用一个字都不用改。
     public init(directory: URL? = nil,
-                tokens: TokenStore = KeychainTokenStore(),
-                makeTransport: @escaping TransportFactory = ServerSession.defaultTransport) {
+                tokens: TokenStore? = nil,
+                makeTransport: TransportFactory? = nil) {
+        #if MIZAR_DEMO
+        // 演示构建里，**只有"什么都没传"的那一种构造**被换成假的。
+        //
+        // 判据刻意是"三个都为 nil"而不是"MIZAR_DEMO 开着"：测试与验收
+        // 工具全部显式传参，演示构建里跑 `swift test` 时它们要的仍是自己
+        // 给的那一套 —— 否则一批与演示无关的测试会突然拿到假内核，
+        // 而那正是"演示模式污染了生产语义"的一种。
+        if directory == nil, tokens == nil, makeTransport == nil {
+            // 每次启动都重写本机记录：演示状态必须是确定的（见
+            // `DemoData.prepare`）。写的是缓存目录，不是用户真实的
+            // 应用支持目录。
+            DemoData.prepare()
+            self.pool = ServerPool(directory: DemoData.directory,
+                                   tokens: DemoTokenStore(),
+                                   makeTransport: DemoTransport.factory)
+            return
+        }
+        #endif
         let root = directory ?? Self.defaultDirectory()
-        self.pool = ServerPool(directory: root, tokens: tokens, makeTransport: makeTransport)
+        self.pool = ServerPool(directory: root,
+                               tokens: tokens ?? KeychainTokenStore(),
+                               makeTransport: makeTransport ?? ServerSession.defaultTransport)
     }
 
     private static func defaultDirectory() -> URL {

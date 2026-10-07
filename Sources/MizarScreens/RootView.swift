@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 import MizarKit
 import MizarApp
@@ -77,6 +78,19 @@ public struct RootView: View {
                     .transition(.opacity)
             }
         }
+        #if MIZAR_DEMO
+        // 演示横幅。
+        //
+        // # 为什么盖在**最外层**而不是画在某一页里
+        //
+        // 它必须出现在四个页签、以及侧栏上 —— 审核员翻到哪一页，哪一页
+        // 就写着"这是演示数据"。只放在概览页的话，他翻到 DNS 页看到四条
+        // 像模像样的解析记录，没有任何东西告诉他那不是真的。
+        //
+        // 放在加载态那一层**之后**：演示模式没有"连不上"的等待，但万一
+        // 首帧还在读记录，横幅也应该在。
+        .overlay(alignment: .top) { DemoBanner() }
+        #endif
         // 淡入淡出而不是直接切换：加载态消失的那一帧如果与内容出现的
         // 那一帧硬接，观感是"闪了一下"。
         .animation(.easeInOut(duration: 0.25), value: model.launchCover == nil)
@@ -166,19 +180,99 @@ struct TabsView: View {
     @Bindable var model: AppModel
     let server: ServerRecord
 
+    #if MIZAR_DEMO
+    /// 演示构建里，初始页签可以由环境变量指定（`MIZAR_DEMO_TAB=0…3`）。
+    ///
+    /// # 它为什么存在
+    ///
+    /// 演示模式的验收要求**四个页签各一张截图**（审核员看到的就是那四屏），
+    /// 而 `xcrun simctl` 没有点击能力，这台机器上也没有可以脚本化的
+    /// Simulator GUI —— Xcode 27 里 Simulator 不再是
+    /// `Developer/Applications/Simulator.app` 那个独立 app。没有这个入口
+    /// 就只能交出一张截图。
+    ///
+    /// # 它为什么不算"为了截图污染生产代码"
+    ///
+    /// 这个属性和下面那个带 selection 的 TabView 都在 `#if MIZAR_DEMO` 里，
+    /// 生产构建里不存在；而且它只在环境变量被显式设过时才有值 ——
+    /// 默认 0（概览），与没有这个属性时的默认行为一致。
+    @State private var selection = Int(ProcessInfo.processInfo.environment["MIZAR_DEMO_TAB"] ?? "") ?? 0
+    #endif
+
     var body: some View {
-        TabView {
-            OverviewView(model: model)
-                .tabItem { Label(tr("概览", "Overview"), systemImage: "gauge.with.dots.needle.50percent") }
-            ServicesView(model: model)
-                .tabItem { Label(tr("服务", "Services"), systemImage: "square.stack.3d.up") }
-            ResourcesView(model: model)
-                .tabItem { Label(tr("资源", "Resources"), systemImage: "chart.xyaxis.line") }
-            DNSView(model: model)
-                .tabItem { Label(tr("DNS", "DNS"), systemImage: "globe") }
-        }
+        #if MIZAR_DEMO
+        TabView(selection: $selection) { tabs }
+        #else
+        TabView { tabs }
+        #endif
+    }
+
+    /// 四个页签。
+    ///
+    /// 这一段两边共用，`.tag()` 只在演示那一支才有意义（没有 selection
+    /// 绑定时它是无作用的）—— 共用是为了不让两份页签列表各自漂移。
+    @ViewBuilder private var tabs: some View {
+        OverviewView(model: model)
+            .tabItem { Label(tr("概览", "Overview"), systemImage: "gauge.with.dots.needle.50percent") }
+            .tag(0)
+        ServicesView(model: model)
+            .tabItem { Label(tr("服务", "Services"), systemImage: "square.stack.3d.up") }
+            .tag(1)
+        ResourcesView(model: model)
+            .tabItem { Label(tr("资源", "Resources"), systemImage: "chart.xyaxis.line") }
+            .tag(2)
+        DNSView(model: model)
+            .tabItem { Label(tr("DNS", "DNS"), systemImage: "globe") }
+            .tag(3)
     }
 }
+
+/// 演示模式的横幅。
+///
+/// # 它为什么必须存在（而且必须是这一句话）
+///
+/// 演示模式的整套数据都做得"像真的" —— 那是它的用途（让审核员看到这个
+/// 应用正常工作是什么样）。而正因为像真的，**没有横幅**就变成了在骗人：
+/// 审核员会把 203.0.113.42 当成他的服务器地址，把我们编的站点当成他配置
+/// 的站点。两个方向都不可接受 —— 他可能据此给出一个基于假前提的评价，
+/// 也可能事后发现数据是假的而认为整个应用在造假。
+///
+/// 因此这句话说三件事：这是演示数据、没有连任何服务器、下面的一切是示例。
+///
+/// # 它是编译期排他的
+///
+/// 整个类型在 `#if MIZAR_DEMO` 里，`RootView` 里引用它的那一行也在。
+/// 生产构建里这段代码**不存在**，而不是"存在但被一个布尔值隐藏"。
+#if MIZAR_DEMO
+struct DemoBanner: View {
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "info.circle.fill")
+                .foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(tr("演示数据", "Demo data"))
+                    .font(.caption.weight(.semibold))
+                Text(tr("这个版本没有连接任何服务器：下面显示的站点、指标与 DNS 记录都是示例。",
+                        "This build is not connected to any server: the sites, metrics and DNS records below are examples."))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    // 与 `BannerRow` 同样的理由（见该类型的说明）：弹性列里的
+                    // 文本必须同时钉住宽度与高度，否则一段长文案会把自己的
+                    // 理想尺寸向上传播，把整个分栏撑坏。
+                    .frame(maxWidth: Theme.messageMaxWidth, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .glassEffect(.regular, in: .rect(cornerRadius: 12))
+        .padding(.horizontal, 16)
+        .padding(.top, 8)
+        .accessibilityIdentifier("demo-banner")
+    }
+}
+#endif
 
 /// 底部横幅。
 ///
