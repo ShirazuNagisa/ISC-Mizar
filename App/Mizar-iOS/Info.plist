@@ -7,7 +7,7 @@
 <key>CFBundleExecutable</key><string>$(EXECUTABLE_NAME)</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>0.2.1</string>
-<key>CFBundleVersion</key><string>1</string>
+<key>CFBundleVersion</key><string>$(CURRENT_PROJECT_VERSION)</string>
 <!-- 出口合规：本应用不使用**非豁免**的加密。
      它用到的只有 HTTPS（URLSession 提供的标准 TLS）与 Keychain ——
      两者都在豁免范围内（TLS 是"标准加密"，Keychain 是操作系统服务，

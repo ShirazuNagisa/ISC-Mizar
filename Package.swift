@@ -55,7 +55,7 @@ let demoSettings: [SwiftSetting] = demoMode ? [.define("MIZAR_DEMO")] : []
 // 而 SwiftPM 不产出 .app。
 let package = Package(
     name: "ISC-Mizar",
-    platforms: [.iOS("27.0"), .watchOS("27.0"), .macOS("27.0")],
+    platforms: [.iOS("26.0"), .watchOS("26.0"), .macOS("26.0")],
     products: [
         .library(name: "MizarKit", targets: ["MizarKit"]),
         .library(name: "MizarUI", targets: ["MizarUI"]),

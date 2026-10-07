@@ -9,6 +9,7 @@
 #	./Scripts/archive.sh --export       归档之后再导出（**需要用户的 Apple 账号**）
 #	./Scripts/archive.sh --unsigned     归档但不签名（见下）
 #	./Scripts/archive.sh --skip-checks  跳过前置的测试与两个构建
+#	./Scripts/archive.sh --buildNumber 3  指定构建号（TestFlight 每次上传必须递增）
 #	./Scripts/archive.sh --help
 #
 # # 默认归档出来的是**生产**构建：里面没有演示代码
@@ -55,6 +56,14 @@ EXPORT=0
 UNSIGNED=0
 SKIP_CHECKS=0
 DEMO=0
+# `--buildNumber` 带值，因此不能用上面的 for-case 逐字比对。
+BUILD_NUMBER_ARG=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--buildNumber" ]; then BUILD_NUMBER_ARG="$arg"; fi
+  prev="$arg"
+done
+
 for arg in "$@"; do
   case "$arg" in
     --demo) DEMO=1 ;;
@@ -62,6 +71,7 @@ for arg in "$@"; do
     --unsigned) UNSIGNED=1 ;;
     --skip-checks) SKIP_CHECKS=1 ;;
     -h|--help) sed -n '2,52p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --buildNumber) ;;                     # 值在上面那一趟取走了
     *) echo "未知参数：$arg（用 --help 看用法）" >&2; exit 2 ;;
   esac
 done
@@ -89,6 +99,19 @@ fi
 # 那条检查都会失败，而它失败的样子与"版本号根本没上报"一模一样 ——
 # 下一个人会去查上报链路，而真正要改的是脚本里那个字符串。
 VERSION="$(sed -n 's/.*public static let current = "\(.*\)"/\1/p' Sources/MizarKit/Version.swift)"
+
+# 构建号：默认取工程里的 CURRENT_PROJECT_VERSION，可用 --buildNumber 覆盖。
+#
+# TestFlight 要求每次上传的构建号递增，而"每次上传都去改工程文件"是个
+# 会忘记的动作。允许从命令行传，CI 里就能自动递增。
+BUILD_NUMBER="$BUILD_NUMBER_ARG"
+if [ -z "$BUILD_NUMBER" ]; then
+  BUILD_NUMBER="$(sed -n 's/.*CURRENT_PROJECT_VERSION = \([0-9]*\);.*/\1/p' App/ISC-Mizar.xcodeproj/project.pbxproj | head -1)"
+fi
+if [ -z "$BUILD_NUMBER" ]; then
+  echo "❌ 读不出 CURRENT_PROJECT_VERSION" >&2
+  exit 2
+fi
 if [ -z "$VERSION" ]; then
   echo "❌ 读不出 MizarVersion.current —— 脚本与源码已经脱节" >&2
   exit 2
@@ -157,6 +180,15 @@ ARCHIVE_ARGS=(
   -destination 'generic/platform=iOS'
   -archivePath "$ARCHIVE_PATH"
   -derivedDataPath "$DD"
+  # 构建号从这里传进去，而不是写在 Info.plist 里。
+  #
+  # TestFlight **要求每次上传的构建号比上一次大**，而写死在 plist 里意味着
+  # 每次上传都要改两个文件、改完还可能忘记其中一个 —— 那时 App Store
+  # Connect 的报错是 "bundle version must be higher than the previously
+  # uploaded version"，而它指不出是哪个 plist。
+  #
+  # `CURRENT_PROJECT_VERSION` 由 `-buildNumber` 覆盖；不传时用工程里那个。
+  CURRENT_PROJECT_VERSION="$BUILD_NUMBER"
 )
 if [ "$UNSIGNED" = "1" ]; then
   # 不签名：在没有账号的机器上验证归档管线。产物不能上传。
@@ -278,6 +310,33 @@ fi
 echo "✅ 出口合规声明在包里"
 
 # ---------------------------------------------------------------- 导出
+# ---------------------------------------------------------------- 部署目标自检
+#
+# # 为什么必须验，而不是相信构建设置
+#
+# `Build/ArchiveDerivedData*` 是**持久**目录。实测踩到过：把
+# `IPHONEOS_DEPLOYMENT_TARGET` 从 27.0 改成 26.0 之后重新归档，
+# `-showBuildSettings` 已经是 26.0，而归档出来的二进制 `minos` 仍是 27.0 ——
+# 缓存里的旧产物被沿用了。
+#
+# 这类错误**静默进包**：App Store 页面上写着"需要 iOS 27.0 或更高"，
+# 而仓库里明明写着 26.0，两处对不上却没有任何提示。
+#
+# 所以从产物里把 minos 读出来跟工程设置比一遍。它只花几十毫秒。
+EXPECTED_IOS="$(grep -m1 'IPHONEOS_DEPLOYMENT_TARGET = ' App/ISC-Mizar.xcodeproj/project.pbxproj | sed 's/.*= \(.*\);/\1/')"
+APP_BIN="$ARCHIVE_PATH/Products/Applications/ISC Mizar.app/ISC Mizar"
+if [ -f "$APP_BIN" ]; then
+  ACTUAL_IOS="$(vtool -show-build "$APP_BIN" 2>/dev/null | sed -n 's/.*minos \(.*\)/\1/p' | head -1)"
+  if [ "$ACTUAL_IOS" != "$EXPECTED_IOS" ]; then
+    echo "❌ 归档产物的部署目标是 iOS ${ACTUAL_IOS}，而工程里是 ${EXPECTED_IOS}" >&2
+    echo "   多半是 Build/ArchiveDerivedData 里的缓存。删掉它重新归档。" >&2
+    exit 1
+  fi
+  echo "==> 部署目标自检：产物 minos ${ACTUAL_IOS} = 工程设置 ${EXPECTED_IOS}"
+else
+  echo "⚠️  找不到主程序，跳过部署目标自检" >&2
+fi
+
 if [ "$EXPORT" = "0" ]; then
   cat <<EOF
 
