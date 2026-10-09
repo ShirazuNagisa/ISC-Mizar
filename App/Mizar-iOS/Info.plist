@@ -16,8 +16,19 @@
 <key>ITSAppUsesNonExemptEncryption</key><false/>
 <key>LSRequiresIPhoneOS</key><true/>
 <key>UILaunchScreen</key><dict/>
+<!-- 四个方向一个都不能少。App Store 的上传校验**拒绝**缺任何一个的包：
+     ITMS-90474「you need to include all of the … orientations to support
+     iPad multitasking」，而它看的就是这一个键 —— 报错里会把这三个取值
+     原样引出来（实测被拒过一次，就是这一条）。
+
+     倒置竖屏在新款 iPhone 上是空操作：Face ID 机型不提供那个方向，所以
+     它不会真的让 iPhone 界面翻转，存在的意义只是满足 iPad 的多任务要求
+     （`UIRequiresFullScreen` 那条退路已被 Apple 废弃，见 TN3192）。
+     想让应用只支持 iPhone 的话，正解是把工程里的 TARGETED_DEVICE_FAMILY
+     改成 1，而不是把这一条删掉。 -->
 <key>UISupportedInterfaceOrientations</key><array>
   <string>UIInterfaceOrientationPortrait</string>
+  <string>UIInterfaceOrientationPortraitUpsideDown</string>
   <string>UIInterfaceOrientationLandscapeLeft</string>
   <string>UIInterfaceOrientationLandscapeRight</string>
 </array>

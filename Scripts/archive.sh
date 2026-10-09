@@ -64,15 +64,25 @@ for arg in "$@"; do
   prev="$arg"
 done
 
+# 第二趟必须**跳过** --buildNumber 后面那个值。
+#
+# 不跳过的症状很具体：`--buildNumber 2` 里的 `2` 会掉进 `*)` 分支，被当成
+# 未知参数 —— 也就是说这个开关**从来没生效过**，而它是 TestFlight 每次上传
+# 都要用的那一个（构建号必须递增）。这条路径平时不走，所以一直没被发现。
+consumed_value=0
 for arg in "$@"; do
+  if [ "$consumed_value" = "1" ]; then consumed_value=0; continue; fi
   case "$arg" in
     --demo) DEMO=1 ;;
     --export) EXPORT=1 ;;
     --unsigned) UNSIGNED=1 ;;
     --skip-checks) SKIP_CHECKS=1 ;;
     -h|--help) sed -n '2,52p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    --buildNumber) ;;                     # 值在上面那一趟取走了
-    *) echo "未知参数：$arg（用 --help 看用法）" >&2; exit 2 ;;
+    --buildNumber) consumed_value=1 ;;     # 值在上面那一趟取走了
+    # `${arg}` 的花括号不是风格问题：bash 3.2（macOS 自带）在 `$arg` 后面
+    # 紧跟一个多字节字符时会把它们一起当成变量名，于是这一行在报错路径上
+    # 自己抛 "unbound variable"，把真正的问题盖掉。
+    *) echo "未知参数：${arg}（用 --help 看用法）" >&2; exit 2 ;;
   esac
 done
 
@@ -309,6 +319,31 @@ if [ "$ENC" != "false" ]; then
 fi
 echo "✅ 出口合规声明在包里"
 
+# 构建号也要真的落到包里，而且等于这次要求的那个。
+#
+# # 为什么值得单独断言
+#
+# `CURRENT_PROJECT_VERSION` 是从命令行传进 `xcodebuild` 的，而 Info.plist 里
+# 写的是 `$(CURRENT_PROJECT_VERSION)`。中间任何一环没生效（拼错变量名、
+# 参数被解析掉、plist 没被处理），产物里的构建号就还是工程里那个旧值 ——
+# 而 App Store Connect 会以 "bundle version must be higher than the
+# previously uploaded version" 拒绝，报错里**不会**告诉你它看到的是几。
+#
+# 顺带：这个开关曾经因为参数解析的 bug 完全没生效（见文件顶部的说明），
+# 这一条断言就是那种 bug 的探测器。
+PLIST_BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$IOS_APP/Info.plist" 2>/dev/null || echo '')"
+PLIST_BUILD_WATCH="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$WATCH_APP/Info.plist" 2>/dev/null || echo '')"
+if [ "$PLIST_BUILD" != "$BUILD_NUMBER" ]; then
+  echo "❌ 归档包的构建号是 \"$PLIST_BUILD\"，而这次要求的是 \"$BUILD_NUMBER\"" >&2
+  exit 1
+fi
+if [ "$PLIST_BUILD_WATCH" != "$BUILD_NUMBER" ]; then
+  echo "❌ watch 子包的构建号是 \"$PLIST_BUILD_WATCH\"，而这次要求的是 \"$BUILD_NUMBER\"" >&2
+  echo "   两个包的构建号必须一致，否则上传会被拒。" >&2
+  exit 1
+fi
+echo "✅ 构建号 $BUILD_NUMBER 已落到 iOS 与 watch 两个包里"
+
 # ---------------------------------------------------------------- 导出
 # ---------------------------------------------------------------- 部署目标自检
 #
@@ -395,7 +430,7 @@ if ! xcodebuild -exportArchive \
      * 确认那个账号能访问 team 5Q2A46685M；
      * 首次导出时 Xcode 可能会要一次钥匙串授权（只有人能点）。
 
-   归档包本身是好的（$ARCHIVE_PATH），可以在 Xcode 的
+   归档包本身是好的（${ARCHIVE_PATH}），可以在 Xcode 的
    Window → Organizer 里打开它，用图形界面走完剩下的两步。
 EOF
   exit 1

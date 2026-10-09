@@ -20,7 +20,7 @@ for arg in "$@"; do
   case "$arg" in
     --demo) DEMO=1 ;;
     -h|--help) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    *) echo "未知参数：$arg（只认 --demo）" >&2; exit 2 ;;
+    *) echo "未知参数：${arg}（只认 --demo）" >&2; exit 2 ;;
   esac
 done
 

@@ -137,7 +137,7 @@ if [ -z "$EXPECTED" ]; then
 elif printf '%s' "$DEVICES" | grep -q "\"app_version\": *\"$EXPECTED\""; then
   ok "服务端看到的是 Mizar v$EXPECTED"
 else
-  bad "服务端没有收到应用版本号（期望 v$EXPECTED）"
+  bad "服务端没有收到应用版本号（期望 v${EXPECTED}）"
 fi
 
 printf '\n========================================\n'
